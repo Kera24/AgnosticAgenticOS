@@ -1,0 +1,17 @@
+# secrets — never commit credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# agentic runtime artefacts (may contain repo snapshots / prompts)
+.agentic/runs/
+.agentic/worktrees/
+.agentic/memory/disagreements.json
+.agentic/memory/baseline.json
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/

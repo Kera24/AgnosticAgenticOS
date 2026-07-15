@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Invoke one configured role directly (debugging / scripting).
+
+  python .agentic/scripts/invoke-model --role triage --prompt "..." \
+      [--input-file data.json] [--schema .agentic/schemas/triage.schema.json] \
+      [--timeout 120] [--max-output-tokens 2000]
+
+Prints the normalized response JSON; exits 0 only when ok=true."""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.budget import Budget                 # noqa: E402
+from core.config import AGENTIC_DIR, load_config  # noqa: E402
+from core.invoke import invoke_model           # noqa: E402
+from core.redact import redact                 # noqa: E402
+from core.schema import load_schema            # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--role", required=True)
+    ap.add_argument("--prompt")
+    ap.add_argument("--prompt-file")
+    ap.add_argument("--input-file")
+    ap.add_argument("--schema")
+    ap.add_argument("--timeout", type=int)
+    ap.add_argument("--max-output-tokens", type=int)
+    args = ap.parse_args()
+
+    if not args.prompt and not args.prompt_file:
+        ap.error("--prompt or --prompt-file required")
+    prompt = args.prompt or open(args.prompt_file, encoding="utf-8").read()
+    input_data = None
+    if args.input_file:
+        with open(args.input_file, encoding="utf-8") as fh:
+            input_data = json.load(fh)
+    schema = load_schema(args.schema) if args.schema else None
+
+    cfg = load_config()
+    budget = Budget(cfg, os.path.join(str(AGENTIC_DIR), "memory"), "invoke-cli")
+    response = invoke_model(cfg, args.role, prompt, input_data=input_data,
+                            output_schema=schema, timeout=args.timeout,
+                            max_output_tokens=args.max_output_tokens,
+                            budget=budget)
+    print(redact(json.dumps(response, indent=2, default=str)))
+    return 0 if response.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

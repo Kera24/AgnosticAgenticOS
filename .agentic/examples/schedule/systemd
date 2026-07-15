@@ -1,0 +1,24 @@
+# Example systemd units (NOT installed automatically).
+# Copy to /etc/systemd/system/ and `systemctl enable --now agentic.timer`.
+
+# ---- agentic.service --------------------------------------------------------
+[Unit]
+Description=Agentic OS single tick
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/repo
+EnvironmentFile=/path/to/repo/.env
+ExecStartPre=/usr/bin/python3 .agentic/scripts/cost-check
+ExecStart=/usr/bin/python3 .agentic/run tick
+
+# ---- agentic.timer ----------------------------------------------------------
+[Unit]
+Description=Run Agentic OS tick every 2 hours on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 06..18/2:00
+Persistent=false
+
+[Install]
+WantedBy=timers.target

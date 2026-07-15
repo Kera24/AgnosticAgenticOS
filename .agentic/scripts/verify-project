@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Deterministic verification gate. The final technical vote — no AI model
+can override this script's exit code.
+
+  python .agentic/scripts/verify-project [--dir <workdir>] [--log-dir <dir>]
+      [--record-baseline] [--against-baseline]
+
+Exit 0 = all mandatory checks pass (or, with --against-baseline, no new
+regressions versus the recorded baseline). Nonzero otherwise. Logs are
+preserved under --log-dir (default: .agentic/runs/verify-<timestamp>/)."""
+import argparse
+import datetime
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core import gate                          # noqa: E402
+from core.config import AGENTIC_DIR, load_config, repo_root  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir")
+    ap.add_argument("--log-dir")
+    ap.add_argument("--record-baseline", action="store_true")
+    ap.add_argument("--against-baseline", action="store_true")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    workdir = args.dir or str(repo_root(cfg))
+    log_dir = args.log_dir or os.path.join(
+        str(AGENTIC_DIR), "runs",
+        "verify-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    result = gate.run_checks(cfg, workdir, log_dir)
+    if result["no_checks"]:
+        print("WARNING: no deterministic checks configured or detected",
+              file=sys.stderr)
+    for r in result["results"]:
+        print("[%s] %-20s (%s) exit=%s"
+              % ("pass" if r["passed"] else "FAIL", r["name"],
+                 "mandatory" if r["mandatory"] else "optional", r["exit_code"]))
+    print("logs: %s" % log_dir)
+
+    if args.record_baseline:
+        gate.save_baseline(str(AGENTIC_DIR), result["results"])
+        print("baseline recorded")
+    if args.against_baseline:
+        verdict = gate.evaluate_against_baseline(str(AGENTIC_DIR), result)
+        print(json.dumps(verdict, indent=2))
+        return 0 if verdict["ok"] else 1
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

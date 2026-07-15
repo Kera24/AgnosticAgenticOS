@@ -1,0 +1,22 @@
+{
+  "$id": "agentic/triage",
+  "type": "object",
+  "required": ["status", "findings"],
+  "properties": {
+    "status": {"type": "string", "enum": ["quiet", "findings"]},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding", "evidence", "status", "contract_sensitive", "confidence"],
+        "properties": {
+          "finding": {"type": "string", "minLength": 1},
+          "evidence": {"type": "array", "items": {"type": "string"}},
+          "status": {"type": "string", "enum": ["actionable", "informational"]},
+          "contract_sensitive": {"type": "boolean"},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    }
+  }
+}

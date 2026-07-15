@@ -1,0 +1,23 @@
+{
+  "$id": "agentic/worker",
+  "type": "object",
+  "required": ["summary", "blocked", "edits"],
+  "properties": {
+    "summary": {"type": "string"},
+    "blocked": {"type": "boolean"},
+    "blocker": {"type": ["string", "null"]},
+    "edits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "action"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "action": {"type": "string", "enum": ["write", "delete"]},
+          "content": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "commands": {"type": "array", "items": {"type": "string"}}
+  }
+}

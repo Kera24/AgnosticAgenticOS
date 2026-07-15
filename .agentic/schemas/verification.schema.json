@@ -1,0 +1,24 @@
+{
+  "$id": "agentic/verification",
+  "type": "object",
+  "required": ["verdict", "done_when_results", "out_of_scope_changes",
+               "test_integrity_preserved", "reason"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "fail", "uncertain"]},
+    "done_when_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "passed", "evidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "passed": {"type": "boolean"},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "out_of_scope_changes": {"type": "array", "items": {"type": "string"}},
+    "test_integrity_preserved": {"type": "boolean"},
+    "reason": {"type": "string", "minLength": 1}
+  }
+}

@@ -1,0 +1,178 @@
+# Agentic OS configuration.
+# Every value here may be overridden by environment variables, e.g.
+#   AGENTIC_EXECUTION_MODE=auto
+#   AGENTIC_BUDGET_DAILY_LIMIT_USD=10
+#   AGENTIC_ROLE_TRIAGE_MODEL=some-model
+#   AGENTIC_ROLE_TRIAGE_PROVIDER=ollama
+#   AGENTIC_PROVIDER_QWEN_BASE_URL=https://example/v1
+# Model names below are PLACEHOLDERS / examples. Assign the models you want;
+# the orchestration code never depends on a specific vendor or model.
+
+version: 1
+
+project:
+  name: auto            # "auto" = derive from directory name
+  repository_root: ..   # relative to .agentic/
+
+execution:
+  mode: review          # review | auto  (review: everything becomes a draft or queue item)
+  max_tasks_per_run: 1
+  max_changed_lines: 400
+  max_changed_files: 20
+  worktree_enabled: true
+  command_timeout_seconds: 900
+  goal_timeout_seconds: 60
+  # Commands the worker may request via execute_safe_commands. Enforced in code.
+  safe_commands: []     # e.g. ["python -m pytest -q", "npm test"]
+
+roles:
+  triage:
+    provider: openrouter
+    model: example/small-triage-model      # placeholder
+    fallback_role: triage_fallback
+    temperature: 0
+    max_output_tokens: 2000
+    tools: []
+
+  triage_fallback:
+    provider: qwen
+    model: example-fallback-model          # placeholder
+    temperature: 0
+    max_output_tokens: 2000
+    tools: []
+
+  conductor:
+    provider: anthropic
+    model: example-reasoning-model         # placeholder
+    fallback_role: conductor_fallback
+    temperature: 0
+    max_output_tokens: 8000
+    tools:
+      - read_repository
+
+  conductor_fallback:
+    provider: openai
+    model: example-reasoning-model         # placeholder
+    temperature: 0
+    max_output_tokens: 8000
+    tools:
+      - read_repository
+
+  worker:
+    provider: qwen
+    model: example-coding-model            # placeholder
+    fallback_role: worker_fallback
+    temperature: 0
+    max_output_tokens: 16000
+    tools:
+      - read_repository
+      - edit_repository
+      - execute_safe_commands
+
+  worker_fallback:
+    provider: ollama
+    model: example-local-model             # placeholder
+    temperature: 0
+    max_output_tokens: 16000
+    tools:
+      - read_repository
+      - edit_repository
+      - execute_safe_commands
+
+  verifier:
+    provider: openai
+    model: example-verification-model      # placeholder
+    fallback_role: verifier_fallback
+    temperature: 0
+    max_output_tokens: 8000
+    tools: []
+
+  verifier_fallback:
+    provider: anthropic
+    model: example-verification-model      # placeholder
+    temperature: 0
+    max_output_tokens: 8000
+    tools: []
+
+providers:
+  openai:
+    type: openai
+    api_key_env: OPENAI_API_KEY
+
+  anthropic:
+    type: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+
+  openrouter:
+    type: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+
+  qwen:
+    type: openai_compatible
+    base_url_env: QWEN_BASE_URL
+    api_key_env: QWEN_API_KEY
+
+  ollama:
+    type: openai_compatible
+    base_url: http://localhost:11434/v1
+    api_key_required: false
+    cost_free: true
+
+  # custom_command example (disabled until you set a command):
+  # local_cli:
+  #   type: custom_command
+  #   command: ["my-model-cli", "--json"]
+
+budget:
+  daily_limit_usd: 5
+  per_run_limit_usd: 2
+  max_input_tokens_per_run: 500000
+  max_output_tokens_per_run: 50000
+  unknown_price_policy: block      # block | warn | allow
+  warning_percentage: 80
+
+# Pricing is deliberately empty: model prices change, so supply your own.
+# USD per 1,000,000 tokens. Providers flagged cost_free are always $0.
+# pricing:
+#   openai:
+#     example-verification-model: {input: 2.50, output: 10.00, cached: 1.25}
+#   openrouter:
+#     default: {input: 1.00, output: 3.00}
+pricing: {}
+
+retry:
+  maximum_attempts_per_provider: 2
+  backoff_seconds: [2, 10]
+  allow_fallback: true
+  fallback_on_refusal: false
+
+verification:
+  # Deterministic checks. "auto" detects from the repository
+  # (pytest / npm / cargo / go). Add explicit entries to pin them:
+  #   commands:
+  #     - {name: tests, command: "python -m pytest -q", mandatory: true}
+  commands: auto
+  fail_fast: true
+
+trust:
+  # Skills listed here may reach the "auto" tier even though the contract
+  # marks their area sensitive. Empty by default.
+  sensitive_auto_allowed: []
+  sensitive_skills: []          # force-mark skills as sensitive
+  track_by_model: true
+
+contract:
+  # Path patterns whose modification always requires human approval.
+  # Extends .agentic/guardrails/protected-paths.txt.
+  extra_protected_paths: []
+
+integrations:
+  github_cli: auto     # auto | off  (issues/CI context via `gh` when available)
+
+optional_features:
+  quorum_triage: false
+  metric_ratchets: false
+  sparring: false
+  weekly_compost: false
+  notifications: false

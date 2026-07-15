@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Validate model output against a JSON schema.
+
+  python .agentic/scripts/validate-response --schema <schema.json> [file]
+
+Reads text from file or stdin, extracts the first JSON object, validates it
+locally. Exit 0 = valid (prints the extracted JSON); exit 1 = invalid."""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.jsonx import extract_first_json   # noqa: E402
+from core.schema import load_schema, validate  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--schema", required=True)
+    ap.add_argument("file", nargs="?")
+    args = ap.parse_args()
+    text = (open(args.file, encoding="utf-8").read() if args.file
+            else sys.stdin.read())
+    obj = extract_first_json(text)
+    if obj is None:
+        print("invalid: no JSON object found", file=sys.stderr)
+        return 1
+    violations = validate(obj, load_schema(args.schema))
+    if violations:
+        for v in violations:
+            print("invalid: %s" % v, file=sys.stderr)
+        return 1
+    import json
+    print(json.dumps(obj, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

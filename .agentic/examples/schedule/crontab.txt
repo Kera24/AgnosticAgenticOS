@@ -1,0 +1,7 @@
+# Example cron schedule (NOT installed automatically).
+# Scheduled runs obey the same contract, budgets, trust rules, and
+# deterministic checks as manual runs; cost-check refuses to start a tick
+# once the daily budget is spent.
+#
+# Every 2 hours on weekdays:
+0 */2 * * 1-5  cd /path/to/repo && python .agentic/run doctor >/dev/null 2>&1 && python .agentic/scripts/cost-check && python .agentic/run tick >> .agentic/runs/cron.log 2>&1

@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Budget gate for schedulers: exit 0 if a run may start, 1 if the daily
+budget is exhausted. Prints current spend."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core import errors                        # noqa: E402
+from core.budget import Budget                 # noqa: E402
+from core.config import AGENTIC_DIR, load_config  # noqa: E402
+
+
+def main():
+    cfg = load_config()
+    budget = Budget(cfg, os.path.join(str(AGENTIC_DIR), "memory"), "cost-check")
+    spent = budget.daily_spend()
+    limit = cfg.get("budget", {}).get("daily_limit_usd")
+    print("today: %.4f USD of %s USD" % (spent, limit))
+    try:
+        budget.check_before_run()
+    except errors.BudgetExceededError as exc:
+        print("BLOCKED: %s" % exc.detail, file=sys.stderr)
+        return 1
+    for warning in budget.warnings:
+        print("WARNING: %s" % warning, file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

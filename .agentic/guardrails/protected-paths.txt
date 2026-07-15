@@ -1,0 +1,34 @@
+# Gitignore-style patterns. A work order or worker edit touching any of these
+# is sensitive: it can never run autonomously and is queued for a human.
+# One pattern per line. Lines starting with # are comments.
+.env
+.env.*
+**/.env
+**/.env.*
+**/secrets/**
+**/*secret*
+**/*credential*
+**/auth/**
+**/authentication/**
+**/authorization/**
+**/payment/**
+**/payments/**
+**/billing/**
+**/migrations/**
+**/migrate/**
+.github/workflows/**
+**/deploy/**
+**/deployment/**
+Dockerfile
+docker-compose*.yml
+**/terraform/**
+**/*.tf
+**/k8s/**
+**/helm/**
+.agentic/AGENTS.md
+.agentic/contract.md
+.agentic/config.yaml
+.agentic/guardrails/**
+.agentic/core/**
+.agentic/providers/**
+.agentic/scripts/**

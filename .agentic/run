@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Agentic OS entry point.
+
+  python .agentic/run doctor      validate environment + configuration
+  python .agentic/run tick        one full workflow cycle
+  python .agentic/run dry-run     analyse + produce a work order, no edits
+  python .agentic/run queue       show tasks awaiting human review
+  python .agentic/run trust       trust tiers and statistics
+  python .agentic/run audit       recent token/cost usage
+  python .agentic/run goals       evaluate standing goals
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from core import doctor as doctor_mod          # noqa: E402
+from core import goals as goals_mod            # noqa: E402
+from core import queueing                      # noqa: E402
+from core.budget import USAGE_COLUMNS          # noqa: E402
+from core.config import AGENTIC_DIR, load_config, repo_root  # noqa: E402
+from core.trust import TrustLedger             # noqa: E402
+
+
+def cmd_doctor(_cfg):
+    ok, checks = doctor_mod.run_doctor()
+    print(doctor_mod.render(checks))
+    print("\ndoctor:", "OK" if ok else "FAILED")
+    return 0 if ok else 1
+
+
+def cmd_tick(cfg, dry_run=False):
+    from core.orchestrator import run_tick
+    result = run_tick(cfg=cfg, dry_run=dry_run)
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("status") not in ("failed", "triage_failed",
+                                             "conductor_failed",
+                                             "worker_failed") else 1
+
+
+def cmd_queue(cfg):
+    print(queueing.render(os.path.join(str(AGENTIC_DIR), "queue")))
+    return 0
+
+
+def cmd_trust(cfg):
+    print(TrustLedger(cfg, os.path.join(str(AGENTIC_DIR), "memory")).render())
+    return 0
+
+
+def cmd_audit(cfg):
+    path = os.path.join(str(AGENTIC_DIR), "memory", "usage.tsv")
+    if not os.path.exists(path):
+        print("(no usage recorded yet)")
+        return 0
+    rows = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) == len(USAGE_COLUMNS) and parts[0] != "timestamp":
+                rows.append(dict(zip(USAGE_COLUMNS, parts)))
+    totals = {}
+    for r in rows[-500:]:
+        key = (r["provider"], r["model"])
+        t = totals.setdefault(key, {"calls": 0, "in": 0, "out": 0, "usd": 0.0})
+        t["calls"] += 1
+        t["in"] += int(r["input_tokens"] or 0)
+        t["out"] += int(r["output_tokens"] or 0)
+        t["usd"] += float(r["estimated_cost_usd"] or 0)
+    print("%-14s %-30s %6s %10s %10s %10s"
+          % ("PROVIDER", "MODEL", "CALLS", "IN_TOK", "OUT_TOK", "USD"))
+    for (prov, model), t in sorted(totals.items()):
+        print("%-14s %-30s %6d %10d %10d %10.4f"
+              % (prov, model, t["calls"], t["in"], t["out"], t["usd"]))
+    today = sum(float(r["estimated_cost_usd"] or 0) for r in rows
+                if r["timestamp"][:10] == __import__("datetime").date.today().isoformat())
+    print("\ntoday's spend: %.4f USD (daily limit %s)"
+          % (today, load_config().get("budget", {}).get("daily_limit_usd")))
+    return 0
+
+
+def cmd_goals(cfg):
+    violations, results = goals_mod.check_goals(cfg, str(AGENTIC_DIR),
+                                                str(repo_root(cfg)))
+    if not results:
+        print("(no active goals)")
+        return 0
+    for r in results:
+        print("[%s] %s %s" % ("ok" if r["ok"] else "VIOLATED", r["id"],
+                              "" if r["ok"] else "- " + r["detail"]))
+    return 1 if violations else 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    command = argv[0]
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        print("failed to load config: %s" % exc, file=sys.stderr)
+        return 1
+    table = {"doctor": cmd_doctor, "tick": cmd_tick, "queue": cmd_queue,
+             "trust": cmd_trust, "audit": cmd_audit, "goals": cmd_goals}
+    if command == "dry-run":
+        return cmd_tick(cfg, dry_run=True)
+    if command not in table:
+        print("unknown command %r\n%s" % (command, __doc__), file=sys.stderr)
+        return 2
+    return table[command](cfg)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

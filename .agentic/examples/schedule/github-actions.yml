@@ -1,0 +1,39 @@
+# Example GitHub Actions scheduler (NOT active: lives outside
+# .github/workflows until a human copies it there).
+name: agentic-tick
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 6 * * 1-5"
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install pyyaml
+      - name: doctor
+        run: python .agentic/run doctor
+        env: &agentic_env
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          QWEN_BASE_URL: ${{ secrets.QWEN_BASE_URL }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+      - name: budget gate
+        run: python .agentic/scripts/cost-check
+        env: *agentic_env
+      - name: tick
+        run: python .agentic/run tick
+        env: *agentic_env
+      - name: upload run artefacts (drafts stay in branches; nothing is pushed)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentic-run
+          path: |
+            .agentic/runs/
+            .agentic/queue/
