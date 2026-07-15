@@ -6,7 +6,8 @@ regression, but it is reported honestly; a NEW failure always fails the gate.
 import datetime as _dt
 import json
 import os
-import subprocess
+
+from . import execpolicy
 
 
 def detect_commands(repo_root):
@@ -66,8 +67,17 @@ def save_baseline(agentic_dir, results):
 
 def run_checks(cfg, workdir, log_dir=None, timeout=None):
     """Run every configured check in workdir. Mandatory checks are never
-    skipped; a missing log_dir only skips log persistence, not checks."""
+    skipped; a missing log_dir only skips log persistence, not checks.
+
+    ZERO configured/detected checks is a BLOCKING failure (`ok: false`,
+    `no_checks: true`): a repository without deterministic verification can
+    never pass the gate, and no AI verdict may convert that into success."""
     commands, auto = resolve_commands(cfg, workdir)
+    if not commands:
+        return {"ok": False, "auto_detected": auto, "results": [],
+                "no_checks": True,
+                "reason": "no deterministic checks configured or detected; "
+                          "configure verification.commands"}
     timeout = timeout or int(cfg.get("execution", {})
                              .get("command_timeout_seconds", 900))
     fail_fast = bool((cfg.get("verification", {}) or {}).get("fail_fast", True))
@@ -78,22 +88,20 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
         record = {"name": name, "command": check["command"],
                   "mandatory": mandatory, "passed": False, "exit_code": None,
                   "detail": ""}
-        try:
-            proc = subprocess.run(check["command"], shell=True, cwd=workdir,
-                                  capture_output=True, text=True,
-                                  timeout=timeout)
-            record["exit_code"] = proc.returncode
-            record["passed"] = proc.returncode == 0
-            output = (proc.stdout or "") + (proc.stderr or "")
-        except subprocess.TimeoutExpired:
-            record["detail"] = "timed out after %ss" % timeout
-            output = record["detail"]
-        record["detail"] = record["detail"] or output[-400:].strip()
+        run = execpolicy.run_command(
+            check["command"], cwd=workdir, timeout=timeout,
+            shell_required=bool(check.get("shell_required", False)),
+            source="config")
+        record["exit_code"] = run["exit_code"]
+        record["passed"] = run["exit_code"] == 0 and not run["timed_out"]
+        output = run["stdout"] + run["stderr"]
+        record["detail"] = ("timed out after %ss" % timeout if run["timed_out"]
+                            else output[-400:].strip())
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
             with open(os.path.join(log_dir, name + ".log"), "w",
                       encoding="utf-8", errors="replace") as fh:
-                fh.write("$ %s\nexit: %s\n\n%s" % (check["command"],
+                fh.write("$ %s\nexit: %s\n\n%s" % (run["argv"],
                                                    record["exit_code"], output))
         results.append(record)
         if mandatory and not record["passed"]:
@@ -101,7 +109,7 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
             if fail_fast:
                 break
     return {"ok": ok, "auto_detected": auto, "results": results,
-            "no_checks": not commands}
+            "no_checks": False}
 
 
 def evaluate_against_baseline(agentic_dir, gate):
@@ -109,6 +117,10 @@ def evaluate_against_baseline(agentic_dir, gate):
     are tolerated (flagged), new failures are regressions."""
     baseline = load_baseline(agentic_dir)
     known = (baseline or {}).get("checks", {})
+    if gate.get("no_checks"):
+        return {"ok": False, "regressions": ["no-deterministic-checks-configured"],
+                "known_failing": [], "fully_healthy": False,
+                "baseline_recorded": baseline is not None}
     regressions, tolerated = [], []
     for r in gate["results"]:
         if r["mandatory"] and not r["passed"]:

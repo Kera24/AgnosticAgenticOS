@@ -176,3 +176,123 @@ optional_features:
   sparring: false
   weekly_compost: false
   notifications: false
+
+# =============================================================================
+# FULL-PROJECT BUILD (hybrid CLI / local / API). Machine-specific choices
+# belong in .agentic/config.machine.yaml (git-ignored, written by `run setup`).
+# =============================================================================
+
+# Backends unify all invocation types behind one interface.
+#   type: cli            authenticated subscription CLIs (auth stays with the
+#                        CLI itself; tokens are never read or copied)
+#   type: local          Ollama and compatible local runtimes (cost-free)
+#   type: api            the providers section above (pricing/budget applies)
+#   type: custom_command the existing custom command adapter
+backends:
+  codex:
+    type: cli
+    kind: codex
+    binary: codex
+    auth_probe_args: [login, status]
+    ephemeral: true
+  claude:
+    type: cli
+    kind: configured
+    binary: claude
+    version_args: ["--version"]
+    invoke_args: ["-p", "--output-format", "json"]
+    write_args: ["--permission-mode", "acceptEdits"]
+    prompt_via: stdin
+    parse: auto
+  qwen:
+    type: cli
+    kind: configured
+    binary: qwen
+    version_args: ["--version"]
+    invoke_args: ["-p"]
+    prompt_via: stdin
+    parse: auto
+  ollama:
+    type: local
+    model: null              # selected during setup from installed models
+    api_key_required: false
+    cost_free: true
+  # API backends reference the providers section; enable by assigning a model:
+  # openai_api:  {type: api, provider: openai, model: your-model}
+  # claude_api:  {type: api, provider: anthropic, model: your-model}
+  # qwen_api:    {type: api, provider: qwen, model: your-model}
+  # openrouter_api: {type: api, provider: openrouter, model: vendor/model}
+
+routing:
+  mode: simple               # simple | per_agent
+  primary: null              # set by `run setup` or --primary
+  fallbacks: []
+  per_agent: {}              # architect/conductor/coder/qa/security overrides
+
+interaction:
+  mode: completion_only      # cycle_review | milestone_review | completion_only
+
+notifications:
+  desktop: true
+
+cycle:
+  maximum_tasks: 1
+  target_duration_minutes: 20
+  maximum_duration_minutes: 30
+  maximum_repair_attempts: 3
+  maximum_replans_per_task: 2
+
+cooling:
+  after_success_minutes: 30
+  after_failure_minutes: 30
+  minimum_minutes: 5
+  maximum_minutes: 360
+  adaptive: true
+
+repair:
+  maximum_attempts_per_task: 3
+  maximum_replans_per_task: 2
+  on_exhaustion: block_task_and_continue
+  continue_independent_tasks: true
+
+capacity:
+  safety_multiplier: 1.35    # clamped to [1.0, 3.0]
+  # role_tokens: {conductor: 6000, coder: 20000, qa: 8000, security: 8000}
+
+# Self-imposed local limits. null = not configured; provider limits are
+# NEVER invented — these only add local ceilings you choose.
+limits:
+  codex:
+    maximum_calls_per_hour: null
+    maximum_calls_per_day: null
+    maximum_estimated_tokens_per_hour: null
+    maximum_estimated_tokens_per_day: null
+  claude:
+    maximum_calls_per_hour: null
+    maximum_calls_per_day: null
+  qwen:
+    maximum_calls_per_hour: null
+    maximum_calls_per_day: null
+  ollama:
+    maximum_parallel_calls: 1
+
+scheduler:
+  enabled: true
+  cycle:
+    target_duration_minutes: 20
+    maximum_duration_minutes: 30
+    maximum_tasks: 1
+  cooling:
+    after_success_minutes: 30
+    after_failure_minutes: 30
+    minimum_minutes: 5
+    maximum_minutes: 360
+  continuation:
+    automatic: true
+    resume_after_restart: true
+    stop_when_project_complete: true
+  operating_window:
+    enabled: false
+    timezone: Australia/Sydney
+    start: "07:00"
+    stop: "22:00"

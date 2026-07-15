@@ -5,11 +5,31 @@
 *.pem
 *.key
 
+# machine-specific configuration (written by `run setup`; never credentials)
+.agentic/config.machine.yaml
+
 # agentic runtime artefacts (may contain repo snapshots / prompts)
 .agentic/runs/
 .agentic/worktrees/
 .agentic/memory/disagreements.json
 .agentic/memory/baseline.json
+.agentic/memory/backends.json
+.agentic/memory/scheduler.json
+.agentic/memory/capacity.tsv
+.agentic/memory/cycles.tsv
+.agentic/memory/notifications.log
+.agentic/memory/trust-by-model.tsv
+.agentic/project/project.lock
+
+# mutable memory ledgers (created on demand; templates ship in git history)
+.agentic/memory/STATE.md
+.agentic/memory/decisions.jsonl
+.agentic/memory/usage.tsv
+.agentic/memory/trust.tsv
+.agentic/memory/goal-ledger.tsv
+
+# distribution archives
+agentic-os-dist.zip
 
 # python
 __pycache__/

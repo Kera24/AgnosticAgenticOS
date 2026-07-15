@@ -12,9 +12,10 @@ task completes. Goals live in .agentic/goals/*.yaml:
 """
 import datetime as _dt
 import os
-import subprocess
 
 import yaml
+
+from . import execpolicy
 
 LEDGER_COLUMNS = ["timestamp", "goal_id", "result", "detail"]
 
@@ -33,13 +34,12 @@ def load_goals(goals_dir):
     return goals
 
 
-def _run_predicate(predicate, cwd, timeout):
-    try:
-        proc = subprocess.run(predicate, shell=True, cwd=cwd,
-                              capture_output=True, text=True, timeout=timeout)
-        return proc.returncode == 0, (proc.stdout + proc.stderr)[-300:].strip()
-    except subprocess.TimeoutExpired:
+def _run_predicate(predicate, cwd, timeout, shell_required=False):
+    run = execpolicy.run_command(predicate, cwd=cwd, timeout=timeout,
+                                 shell_required=shell_required, source="config")
+    if run["timed_out"]:
         return False, "predicate timed out after %ss" % timeout
+    return run["exit_code"] == 0, (run["stdout"] + run["stderr"])[-300:].strip()
 
 
 def check_goals(cfg, agentic_dir, repo_root_path):
@@ -52,7 +52,8 @@ def check_goals(cfg, agentic_dir, repo_root_path):
     for goal in load_goals(goals_dir):
         if goal.get("status") != "active" or not goal.get("predicate"):
             continue
-        ok, detail = _run_predicate(goal["predicate"], repo_root_path, timeout)
+        ok, detail = _run_predicate(goal["predicate"], repo_root_path, timeout,
+                                    bool(goal.get("shell_required", False)))
         results.append({"id": goal.get("id", goal["_file"]), "ok": ok,
                         "detail": detail,
                         "on_violation": goal.get("on_violation", "alert")})

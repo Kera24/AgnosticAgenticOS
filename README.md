@@ -1,16 +1,30 @@
 # Agentic Development OS
 
 A provider-agnostic, trust-gated autonomous development system that lives in
-`.agentic/`. It inspects the repository, picks one highest-value task,
-delegates implementation to a configured **worker** model, has the result
-judged by an independent **verifier** model, and gives the final vote to
-**deterministic checks** — never to an AI. Autonomy is earned per skill via a
-trust ledger, spending is capped by budgets, and anything sensitive waits in
-a human-approval queue.
+`.agentic/`. It has two modes:
 
-Works with OpenAI, Anthropic Claude, Qwen, OpenRouter, Ollama, any
-OpenAI-compatible endpoint, or any local CLI — chosen purely by
-configuration. No SDKs; the only dependency is Python 3.8+ with PyYAML.
+1. **Full-project build** — give it a complete application plan once; it
+   architects, plans milestones and a backlog, then builds the application
+   across isolated ~20-minute cycles with cooling periods, capacity-aware
+   scheduling, QA + conditional security review, and a final audit — then
+   notifies you when the application is ready for review.
+2. **Repository maintenance** — the original tick loop: find one
+   highest-value task, implement, verify, queue for approval.
+
+In both modes the final vote belongs to **deterministic checks** — never to
+an AI — and no agent approves its own work.
+
+**Backends (hybrid):**
+
+| type | examples | cost model |
+|---|---|---|
+| `cli` | Codex CLI, Claude Code, Qwen CLI, future coding CLIs | your existing subscription; auth stays inside each CLI |
+| `local` | Ollama | free; time/token limits still enforced |
+| `api` | OpenAI, Anthropic, Qwen/OpenAI-compatible, OpenRouter | API pricing (budget-enforced) |
+| `custom_command` | any local command | you decide |
+
+No SDKs; the only dependency is Python 3.8+ with PyYAML. API keys are never
+required when your selected backends are CLI or local.
 
 ## Architecture
 
@@ -285,12 +299,127 @@ your scheduler; none of them weaken the contract, budget, or gate.
   test commands, which is code execution by definition — run in a container
   or CI when the repository content is not fully trusted.
 
+## Full-project build mode
+
+```sh
+make agent-setup                  # detect CLIs/Ollama/APIs, choose routing,
+                                  # write .agentic/config.machine.yaml
+make project-start PLAN=plan.md   # architect: plan -> milestones + backlog
+make project-run                  # run the next eligible cycle
+make project-status               # scheduler + progress + blockers
+make project-pause / project-resume
+make project-review               # run the final audit now
+make agent-capacity               # capacity ledger + next-cycle estimate
+make agent-backends               # circuit-breaker states
+```
+
+(Direct equivalents: `python .agentic/run setup|project-start|project-run|…`.)
+
+**How a cycle works:** the capacity manager decides start/reroute/wait →
+conductor turns one backlog task into a bounded work order → coder implements
+it in the persistent `agentic/project` worktree (CLI coders edit files
+directly under a `workspace-write` sandbox; API/local coders return
+structured edits applied by the OS) → deterministic checks run (a repo with
+**zero** checks blocks, always) → up to 3 repair attempts (with a structured
+handoff to the next backend if the current one runs out mid-task) → QA
+reviewer judges the diff → security reviewer runs only when the change
+touches security-relevant territory → the cycle commits, project state
+updates, and cooling starts (30 min after success or ordinary failure;
+dynamic after rate/usage limits, clamped to 5–360 min).
+
+**Resume after anything:** all state (backlog, scheduler, breakers, capacity
+ledger) is persisted; after a process/computer restart, exhausted CLI quota,
+or an interrupted cycle, `project-run`/`project-resume` continues exactly
+where it stopped and never regenerates completed work. Long waits are never a
+blocking sleep — the next eligible time is persisted; re-invoke manually or
+via a timer you install yourself (see `.agentic/examples/schedule/`).
+
+**Interaction modes** (`interaction.mode`): `cycle_review` notifies after
+every cycle; `milestone_review` notifies per milestone; `completion_only`
+(default) notifies only for: project complete, a genuine human-only blocker,
+all backends unavailable beyond the window, or a security-critical decision.
+
+**Completion** is evidence, not an empty backlog: the final audit requires
+milestones done, no open blockers, mandatory checks green, no uncommitted
+changes, no committed secrets, `.env.example` where needed, and an
+independent final review — results in `.agentic/project/final-audit.yaml`.
+The finished application sits on the `agentic/project` branch for **you** to
+review and merge; the OS never pushes, merges, or deploys.
+
+## CLI subscription backends
+
+Authentication always stays inside each official CLI — the OS never reads,
+copies, prints, or commits cached tokens; health checks use the CLI's own
+status commands (e.g. `codex login status`).
+
+- **Codex:** install and `codex login`, then run setup. Invocations are
+  `codex exec --ephemeral --json --sandbox <mode> --ask-for-approval never
+  --cd <workspace>`; `workspace-write` only for the coder role, `read-only`
+  for everyone else; `--dangerously-bypass-approvals-and-sandbox` is on a
+  hard forbidden list.
+- **Claude Code / Qwen CLI:** version-detected, template-configured adapters
+  (`backends.claude` / `backends.qwen` in config) — exact flags live in
+  configuration, are validated at setup, and require a passing
+  non-interactive smoke test before autonomous use. Interactive TUIs are
+  never automated by keystroke injection.
+- **Ollama:** detected via `ollama list`; pick an installed model during
+  setup. Free, but time/token limits still apply.
+
+## Capacity, cooling, circuit breakers
+
+Subscription CLIs rarely expose exact quotas, so every capacity figure is
+labelled `reported`, `estimated`, or `unknown` — **estimates are local
+approximations and are never presented as provider-reported quota.** Before
+each cycle the manager estimates conductor+coder+QA+security+repair-reserve
+tokens (× `capacity.safety_multiplier`, default 1.35) against history and
+your self-imposed `limits:` (null = not configured; provider limits are never
+invented), then decides start / reroute / wait / human-required. Rate-limit
+and usage-limit events open per-backend circuit breakers with explicit
+retry-after/reset parsing when available, or growing historical recovery
+estimates when not; re-enabling requires the wait plus a health check.
+Fallback routing is ordered and logged, and never fires for auth failures or
+refusals. One-run override: `project-run --primary codex --fallback claude
+--fallback ollama`.
+
+## Permissions and security boundaries
+
+Autonomous means non-interactive inside a pre-authorised boundary: read/edit
+repository files, worktrees and local branches/commits, allowlisted commands,
+tests/lint/build, state updates, fallback switching, pause/resume. Never:
+push, merge, deploy, message anyone, touch DNS/cloud, read credentials,
+access unrelated directories, or destructive external actions. Commands are
+argv arrays — `shell=True` exists only in the execution-policy module for
+explicitly `shell_required: true` admin-authored config entries; commands
+from model output must match the allowlist verbatim and never get a shell.
+
+## Troubleshooting / disabling automation
+
+- `make agent-doctor` — full readiness report (backends, auth status without
+  credential content, routing, breakers, scheduler, project, capacity
+  confidence). Warnings are never presented as readiness.
+- Stuck cycle: locks staler than 2h self-break; `make project-status` shows
+  the cooling reason and next run time.
+- Backend stuck "unavailable": inspect `make agent-backends`; delete
+  `.agentic/memory/backends.json` to reset breakers.
+- **Disable automation:** `make project-pause` stops cycles; remove any
+  timer/cron entry you installed; nothing runs unless something invokes
+  `project-run`. Scheduling is never activated automatically.
+- Clean distribution: `python .agentic/run package` builds a zip that
+  excludes runs, worktrees, machine config, memory ledgers, and caches.
+
 ## Tests
 
-`make test` — 30+ tests, all provider calls mocked (no network, no cost),
-covering provider selection/routing, env overrides, malformed output +
-schema repair, refusals, timeouts, fallbacks, budgets, unknown prices,
-redaction, protected paths, line limits, trust promotion/demotion, goals,
-gate failures, maker/verifier disagreement, dry-run, preservation of
-unrelated working-tree changes, and prompt-injection resistance at the
-policy boundary.
+`make agent-test` — 103 tests, all CLI processes and API transports mocked
+(no network, no subscription quota, no cost). Live smoke tests are opt-in and
+clearly labelled: `AGENTIC_LIVE_SMOKE=1 pytest tests/test_live_smoke.py`.
+
+Coverage spans the original maintenance mode (providers, budgets, trust,
+goals, gates, injection resistance) plus configuration layering, the setup
+wizard, CLI adapters (Codex/Claude/Qwen/Ollama) with credential-isolation
+guards, fallback routing, circuit breakers, retry-after parsing, capacity
+estimation and start decisions, cooldowns, scheduler persistence, overlap
+locks, restart/resume, dependency ordering, conditional security review,
+repair limits, structured handoff, zero-check blocking, budget-exception
+containment, shell-execution policy, secret scanning, no-push/merge/deploy
+guards, notification policy, the final audit, and a mocked end-to-end
+complete-project build.

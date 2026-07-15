@@ -1,0 +1,24 @@
+{
+  "$id": "agentic/security-review",
+  "type": "object",
+  "required": ["verdict", "concerns", "reason"],
+  "properties": {
+    "verdict": {"type": "string",
+                "enum": ["pass", "fail", "uncertain",
+                         "human_review_required"]},
+    "concerns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "description"],
+        "properties": {
+          "severity": {"type": "string",
+                       "enum": ["critical", "high", "medium", "low"]},
+          "description": {"type": "string"},
+          "evidence": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "reason": {"type": "string", "minLength": 1}
+  }
+}

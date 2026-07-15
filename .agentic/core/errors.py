@@ -60,8 +60,38 @@ class PolicyError(AgenticError):
     kind = "policy"              # contract/guardrail violation; queue or stop
 
 
-# Error kinds that justify switching to the fallback role.
+class UsageLimitError(AgenticError):
+    kind = "usage_limit"         # subscription quota exhausted; cool + reroute
+
+    def __init__(self, detail="", provider=None, model=None,
+                 retry_after_seconds=None, reset_at=None):
+        super().__init__(detail, provider, model)
+        self.retry_after_seconds = retry_after_seconds
+        self.reset_at = reset_at
+
+
+class PermissionDeniedError(AgenticError):
+    kind = "permission_denied"   # sandbox/approval denial; never bypass
+
+
+class InterruptedProcessError(AgenticError):
+    kind = "interrupted"         # process killed/crashed mid-run
+
+
+class UnknownFailureError(AgenticError):
+    kind = "unknown"
+
+
+class BackendUnavailableError(AgenticError):
+    kind = "backend_unavailable"  # CLI not installed / server down
+
+
+# Error kinds that justify switching to the fallback role/backend.
 FALLBACK_KINDS = {"rate_limit", "timeout", "model_unavailable",
-                  "context_length", "provider_error"}
+                  "context_length", "provider_error", "usage_limit",
+                  "interrupted", "unknown", "backend_unavailable"}
 # Error kinds worth retrying on the same provider first.
 RETRYABLE_KINDS = {"rate_limit", "timeout", "provider_error"}
+# Kinds that must NEVER trigger fallback (config problems / safety refusals
+# must not be routed around).
+NO_FALLBACK_KINDS = {"auth", "policy", "budget_exceeded", "permission_denied"}

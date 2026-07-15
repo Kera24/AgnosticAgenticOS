@@ -38,13 +38,57 @@ def repo_root(cfg):
     return (AGENTIC_DIR / rel).resolve()
 
 
-def load_config(path=None, env=None):
+def deep_merge(base, override):
+    """Recursively merge override into a copy of base (dicts only; other
+    values are replaced)."""
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _load_yaml(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def set_path(cfg, dotted_key, value):
+    """Set cfg['a']['b'] from 'a.b' (used by --set CLI overrides)."""
+    node = cfg
+    keys = dotted_key.split(".")
+    for key in keys[:-1]:
+        node = node.setdefault(key, {})
+    node[keys[-1]] = _coerce(value) if isinstance(value, str) else value
+
+
+def load_config(path=None, env=None, profile=None, cli_overrides=None):
+    """Configuration precedence (later wins):
+    1. .agentic/config.yaml            (repository defaults, committed)
+    2. .agentic/config.machine.yaml    (this computer; git-ignored; no secrets)
+    3. .agentic/profiles/<name>.yaml   (selected named configuration)
+    4. AGENTIC_* environment overrides
+    5. CLI overrides (--primary/--fallback/--set)
+    """
     env = env if env is not None else os.environ
     path = Path(path or env.get("AGENTIC_CONFIG") or (AGENTIC_DIR / "config.yaml"))
-    with open(path, "r", encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh) or {}
+    cfg = _load_yaml(path)
+    machine_path = AGENTIC_DIR / "config.machine.yaml"
+    if machine_path.exists():
+        cfg = deep_merge(cfg, _load_yaml(machine_path))
+    profile = profile or env.get("AGENTIC_PROFILE")
+    if profile:
+        profile_path = AGENTIC_DIR / "profiles" / (profile + ".yaml")
+        if not profile_path.exists():
+            raise FileNotFoundError("profile %r not found at %s"
+                                    % (profile, profile_path))
+        cfg = deep_merge(cfg, _load_yaml(profile_path))
     cfg = copy.deepcopy(cfg)
     _apply_env_overrides(cfg, env)
+    for override in (cli_overrides or {}).items():
+        set_path(cfg, override[0], override[1])
     if cfg.get("project", {}).get("name") in (None, "auto"):
         cfg.setdefault("project", {})["name"] = repo_root(cfg).name
     return cfg

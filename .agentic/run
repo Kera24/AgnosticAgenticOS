@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
 """Agentic OS entry point.
 
-  python .agentic/run doctor      validate environment + configuration
-  python .agentic/run tick        one full workflow cycle
-  python .agentic/run dry-run     analyse + produce a work order, no edits
-  python .agentic/run queue       show tasks awaiting human review
-  python .agentic/run trust       trust tiers and statistics
-  python .agentic/run audit       recent token/cost usage
-  python .agentic/run goals       evaluate standing goals
+Repository maintenance:
+  python .agentic/run doctor            validate environment + configuration
+  python .agentic/run tick              one maintenance workflow cycle
+  python .agentic/run dry-run           analyse + work order, no edits
+  python .agentic/run queue|trust|audit|goals
+
+Full-project build:
+  python .agentic/run setup             interactive machine configuration
+  python .agentic/run project-start plan.md
+  python .agentic/run project-run [--primary X --fallback Y --fallback Z]
+  python .agentic/run project-resume | project-status | project-pause
+  python .agentic/run project-review    run the final audit now
+  python .agentic/run capacity          capacity ledger + next-cycle estimate
+  python .agentic/run backends          backend circuit-breaker states
+  python .agentic/run package           clean distributable archive
+
+Overrides (any command): --primary/--fallback (one run only),
+--set key.path=value, --profile NAME
 """
+import argparse
 import json
 import os
 import sys
@@ -22,37 +34,43 @@ from core.budget import USAGE_COLUMNS          # noqa: E402
 from core.config import AGENTIC_DIR, load_config, repo_root  # noqa: E402
 from core.trust import TrustLedger             # noqa: E402
 
+MEMORY = os.path.join(str(AGENTIC_DIR), "memory")
 
-def cmd_doctor(_cfg):
-    ok, checks = doctor_mod.run_doctor()
+
+def _print(result):
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_doctor(cfg, args):
+    ok, checks = doctor_mod.run_doctor(cfg=cfg)
     print(doctor_mod.render(checks))
     print("\ndoctor:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
 
-def cmd_tick(cfg, dry_run=False):
+def cmd_tick(cfg, args, dry_run=False):
     from core.orchestrator import run_tick
     result = run_tick(cfg=cfg, dry_run=dry_run)
-    print(json.dumps(result, indent=2, default=str))
+    _print(result)
     return 0 if result.get("status") not in ("failed", "triage_failed",
                                              "conductor_failed",
                                              "worker_failed") else 1
 
 
-def cmd_queue(cfg):
+def cmd_queue(cfg, args):
     print(queueing.render(os.path.join(str(AGENTIC_DIR), "queue")))
     return 0
 
 
-def cmd_trust(cfg):
-    print(TrustLedger(cfg, os.path.join(str(AGENTIC_DIR), "memory")).render())
+def cmd_trust(cfg, args):
+    print(TrustLedger(cfg, MEMORY).render())
     return 0
 
 
-def cmd_audit(cfg):
-    path = os.path.join(str(AGENTIC_DIR), "memory", "usage.tsv")
+def cmd_audit(cfg, args):
+    path = os.path.join(MEMORY, "usage.tsv")
     if not os.path.exists(path):
-        print("(no usage recorded yet)")
+        print("(no API usage recorded yet)")
         return 0
     rows = []
     with open(path, encoding="utf-8") as fh:
@@ -73,14 +91,10 @@ def cmd_audit(cfg):
     for (prov, model), t in sorted(totals.items()):
         print("%-14s %-30s %6d %10d %10d %10.4f"
               % (prov, model, t["calls"], t["in"], t["out"], t["usd"]))
-    today = sum(float(r["estimated_cost_usd"] or 0) for r in rows
-                if r["timestamp"][:10] == __import__("datetime").date.today().isoformat())
-    print("\ntoday's spend: %.4f USD (daily limit %s)"
-          % (today, load_config().get("budget", {}).get("daily_limit_usd")))
     return 0
 
 
-def cmd_goals(cfg):
+def cmd_goals(cfg, args):
     violations, results = goals_mod.check_goals(cfg, str(AGENTIC_DIR),
                                                 str(repo_root(cfg)))
     if not results:
@@ -92,24 +106,163 @@ def cmd_goals(cfg):
     return 1 if violations else 0
 
 
+def cmd_setup(cfg, args):
+    from core.setupwiz import run_setup
+    result = run_setup(cfg=cfg, smoke=not args.no_smoke)
+    return 0 if result["ok"] else 1
+
+
+def _overrides(args):
+    if args.primary:
+        return {"primary": args.primary, "fallbacks": args.fallback or []}
+    return None
+
+
+def cmd_project_start(cfg, args):
+    from core.project import project_start
+    if not args.plan:
+        print("usage: project-start <plan.md>", file=sys.stderr)
+        return 2
+    result = project_start(cfg, args.plan, overrides=_overrides(args))
+    _print(result)
+    return 0 if result["status"] in ("started",) else 1
+
+
+def cmd_project_run(cfg, args):
+    from core.project import project_run
+    result = project_run(cfg, overrides=_overrides(args),
+                         max_cycles=args.max_cycles)
+    _print(result)
+    return 0 if result.get("status") not in ("failure", "audit_failed") else 1
+
+
+def cmd_project_resume(cfg, args):
+    from core.project import project_resume, project_run
+    _print(project_resume(cfg))
+    result = project_run(cfg, overrides=_overrides(args), max_cycles=1)
+    _print(result)
+    return 0
+
+
+def cmd_project_status(cfg, args):
+    from core.project import project_status
+    _print(project_status(cfg))
+    return 0
+
+
+def cmd_project_pause(cfg, args):
+    from core.project import project_pause
+    _print(project_pause(cfg))
+    return 0
+
+
+def cmd_project_review(cfg, args):
+    from core.project import final_audit
+    result = final_audit(cfg, overrides=_overrides(args))
+    _print(result)
+    return 0 if result["status"] == "complete" else 1
+
+
+def cmd_capacity(cfg, args):
+    from core.capacity import CapacityLedger, estimate_cycle_tokens
+    from core import projstate
+    ledger = CapacityLedger(cfg, MEMORY)
+    task = projstate.next_task(AGENTIC_DIR) if projstate.exists(AGENTIC_DIR) \
+        else None
+    routing = cfg.get("routing") or {}
+    backend = routing.get("primary", "-")
+    estimate = estimate_cycle_tokens(cfg, task or {}, ledger, backend)
+    _print({"next_task": (task or {}).get("id"),
+            "backend": backend, "estimate": estimate,
+            "recent_cycles": ledger.recent_cycles(limit=5),
+            "note": "all figures are local ESTIMATES, not provider quotas"})
+    return 0
+
+
+def cmd_backends(cfg, args):
+    from core.breaker import BreakerBoard
+    print(BreakerBoard(MEMORY).render())
+    return 0
+
+
+def cmd_package(cfg, args):
+    """Clean distributable zip: excludes runtime artefacts, machine config,
+    caches, and anything git-ignored or sensitive."""
+    import zipfile
+    import subprocess
+    root = str(repo_root(cfg))
+    out = args.plan or "agentic-os-dist.zip"
+    tracked = subprocess.run(["git", "ls-files"], cwd=root,
+                             capture_output=True, text=True).stdout.split("\n")
+    excluded_prefixes = (".agentic/runs/", ".agentic/worktrees/",
+                         ".agentic/memory/", ".pytest_cache/", "__pycache__/")
+    excluded_names = (".env", ".agentic/config.machine.yaml")
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in tracked:
+            name = name.strip()
+            if not name or name in excluded_names or \
+                    any(name.startswith(p) or "/__pycache__/" in name
+                        for p in excluded_prefixes):
+                continue
+            path = os.path.join(root, name)
+            if os.path.exists(path):
+                zf.write(path, name)
+        # ship pristine memory templates instead of local ledgers
+        for tmpl, content in (
+                ("STATE.md", "# Agentic OS State\n"),
+                ("trust.tsv", "skill\ttotal_runs\tpasses\tfailures\t"
+                 "consecutive_failures\tpass_rate\tcurrent_tier\t"
+                 "last_result\tupdated_at\n")):
+            zf.writestr(".agentic/memory/" + tmpl, content)
+    print("wrote %s (%d files, local artefacts excluded)"
+          % (out, len(zf.namelist())))
+    return 0
+
+
+COMMANDS = {
+    "doctor": cmd_doctor, "tick": cmd_tick, "queue": cmd_queue,
+    "trust": cmd_trust, "audit": cmd_audit, "goals": cmd_goals,
+    "setup": cmd_setup, "project-start": cmd_project_start,
+    "project-run": cmd_project_run, "project-resume": cmd_project_resume,
+    "project-status": cmd_project_status, "project-pause": cmd_project_pause,
+    "project-review": cmd_project_review, "capacity": cmd_capacity,
+    "backends": cmd_backends, "package": cmd_package,
+}
+
+
 def main(argv):
-    if not argv or argv[0] in ("-h", "--help", "help"):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("command", nargs="?")
+    parser.add_argument("plan", nargs="?")
+    parser.add_argument("--primary")
+    parser.add_argument("--fallback", action="append", default=[])
+    parser.add_argument("--set", dest="sets", action="append", default=[])
+    parser.add_argument("--profile")
+    parser.add_argument("--max-cycles", type=int, default=1)
+    parser.add_argument("--no-smoke", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    args = parser.parse_args(argv)
+    if args.help or not args.command:
         print(__doc__)
         return 0
-    command = argv[0]
+    overrides = {}
+    for item in args.sets:
+        if "=" in item:
+            key, _, value = item.partition("=")
+            overrides[key.strip()] = value.strip()
     try:
-        cfg = load_config()
+        cfg = load_config(profile=args.profile, cli_overrides=overrides)
     except Exception as exc:
         print("failed to load config: %s" % exc, file=sys.stderr)
         return 1
-    table = {"doctor": cmd_doctor, "tick": cmd_tick, "queue": cmd_queue,
-             "trust": cmd_trust, "audit": cmd_audit, "goals": cmd_goals}
-    if command == "dry-run":
-        return cmd_tick(cfg, dry_run=True)
-    if command not in table:
-        print("unknown command %r\n%s" % (command, __doc__), file=sys.stderr)
+    if args.command == "dry-run":
+        return cmd_tick(cfg, args, dry_run=True)
+    handler = COMMANDS.get(args.command)
+    if handler is None:
+        print("unknown command %r\n%s" % (args.command, __doc__),
+              file=sys.stderr)
         return 2
-    return table[command](cfg)
+    return handler(cfg, args)
 
 
 if __name__ == "__main__":

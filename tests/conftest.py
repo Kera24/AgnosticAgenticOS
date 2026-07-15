@@ -162,6 +162,156 @@ class FakeInvoker:
                 "refusal": False, "error": None}
 
 
+class FakeRunner:
+    """Scripted CLI process runner: pops one result dict per call, records
+    every argv. Result template: exit_code/stdout/stderr/timed_out."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, argv, cwd=None, timeout=120, stdin_text=None):
+        self.calls.append({"argv": list(argv), "cwd": cwd,
+                           "timeout": timeout, "stdin": stdin_text})
+        item = self.responses.pop(0) if self.responses else \
+            {"exit_code": 0, "stdout": "", "stderr": ""}
+        if isinstance(item, Exception):
+            raise item
+        result = {"exit_code": 0, "stdout": "", "stderr": "",
+                  "timed_out": False, "argv": list(argv), "cwd": cwd,
+                  "shell": False, "source": "config",
+                  "duration_seconds": 0.01}
+        result.update(item)
+        return result
+
+
+class Clock:
+    """Controllable clock for scheduler/breaker/capacity tests."""
+
+    def __init__(self):
+        import datetime
+        self.now = datetime.datetime(2026, 7, 15, 12, 0, 0)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, minutes=0, seconds=0):
+        import datetime
+        self.now += datetime.timedelta(minutes=minutes, seconds=seconds)
+
+
+class FakeCaller:
+    """Stands in for the common backend caller in project-mode tests."""
+
+    def __init__(self, by_role):
+        self.by_role = {k: list(v) if isinstance(v, list) else [v]
+                        for k, v in by_role.items()}
+        self.calls = []
+
+    def __call__(self, role, prompt, input_data=None, schema=None,
+                 workspace=None, permissions="read", timeout=None,
+                 chain=None):
+        self.calls.append({"role": role, "input": input_data,
+                           "workspace": workspace,
+                           "permissions": permissions, "chain": chain})
+        outputs = self.by_role.get(role)
+        assert outputs, "no scripted output for role %r" % role
+        item = outputs.pop(0) if len(outputs) > 1 else outputs[0]
+        if callable(item):
+            item = item(workspace, input_data)
+        if isinstance(item, dict) and item.get("_error"):
+            return {"ok": False, "backend": item.get("backend", "mock"),
+                    "backend_type": "api", "model": None, "role": role,
+                    "provider": "mock", "content": "",
+                    "structured_output": {},
+                    "usage": {"input_tokens": None,
+                              "cached_input_tokens": None,
+                              "output_tokens": None,
+                              "reasoning_tokens": None, "estimated": True},
+                    "capacity": {"remaining_reported": None, "reset_at": None,
+                                 "retry_after_seconds":
+                                     item.get("retry_after")},
+                    "finish_reason": "error", "refusal": False,
+                    "exit_code": None, "estimated_cost_usd": 0.0,
+                    "error": {"kind": item["_error"],
+                              "detail": item.get("detail", "")}}
+        content = item.get("_content") if isinstance(item, dict) else None
+        structured = {} if content is not None else item
+        return {"ok": True, "backend": item.get("_backend", "mock")
+                if isinstance(item, dict) else "mock",
+                "backend_type": "api", "model": "mock-model", "role": role,
+                "provider": "mock",
+                "content": content if content is not None
+                else json.dumps(structured),
+                "structured_output": structured,
+                "usage": {"input_tokens": 100, "cached_input_tokens": 0,
+                          "output_tokens": 50, "reasoning_tokens": None,
+                          "estimated": False},
+                "capacity": {"remaining_reported": None, "reset_at": None,
+                             "retry_after_seconds": None},
+                "finish_reason": "completed", "refusal": False,
+                "exit_code": 0, "estimated_cost_usd": 0.0, "error": None}
+
+
+def project_cfg(sandbox):
+    """Extend the sandbox cfg with full-project-build configuration."""
+    cfg = sandbox["cfg"]
+    cfg["backends"] = {
+        "mock": {"type": "api", "provider": "mock", "model": "mock-model"},
+        "mock2": {"type": "api", "provider": "mock", "model": "mock-2"},
+    }
+    cfg["routing"] = {"mode": "simple", "primary": "mock",
+                      "fallbacks": ["mock2"]}
+    cfg["repair"] = {"maximum_attempts_per_task": 3,
+                     "maximum_replans_per_task": 2}
+    cfg["capacity"] = {"safety_multiplier": 1.35}
+    cfg["interaction"] = {"mode": "completion_only"}
+    cfg["notifications"] = {"desktop": False}
+    cfg["limits"] = {}
+    cfg["scheduler"] = {"cooling": {"after_success_minutes": 30,
+                                    "after_failure_minutes": 30,
+                                    "minimum_minutes": 5,
+                                    "maximum_minutes": 360},
+                        "continuation": {"automatic": True},
+                        "operating_window": {"enabled": False}}
+    return cfg
+
+
+def seed_project(sandbox, tasks, milestones=None):
+    import core.projstate as projstate
+    a = str(sandbox["agentic"])
+    milestones = milestones or [{"id": "m1", "title": "milestone 1"}]
+    projstate.write_yaml(a, "milestones.yaml", {"milestones": milestones})
+    projstate.save_backlog(a, [projstate.normalize_task(t) for t in tasks])
+    projstate.write_yaml(a, "acceptance-criteria.yaml",
+                         {"requirements_map": [],
+                          "completion_criteria": ["all checks pass"]})
+    projstate.write_yaml(a, "decisions.yaml", {"human_decisions_needed": [],
+                                               "decided": []})
+    projstate.write_yaml(a, "blockers.yaml", {"blockers": []})
+    projstate.write_text(a, "PROJECT.md", "# plan")
+    projstate.write_text(a, "architecture.md", "# arch")
+    projstate.refresh_progress(a)
+
+
+def simple_task(tid="t1-first", milestone="m1", **over):
+    task = {"id": tid, "milestone": milestone,
+            "description": "set VALUE to 2 in src/app.py",
+            "dependencies": [], "risk": "low", "security_relevant": False,
+            "expected_paths": ["src/**"], "expected_size": "small",
+            "acceptance_criteria": ["src/app.py contains VALUE = 2"],
+            "deterministic_checks": [], "skill": "app-code"}
+    task.update(over)
+    return task
+
+
+def proj_order(task, **over):
+    order = order_out(item=task["description"], skill=task.get("skill")
+                      or task["id"], allowed_paths=task["expected_paths"])
+    order.update(over)
+    return order
+
+
 def triage_out(sensitive=False, actionable=True):
     return {"status": "findings", "findings": [{
         "finding": "lint error in src/app.py",

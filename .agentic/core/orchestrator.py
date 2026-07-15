@@ -11,7 +11,7 @@ import shutil
 import subprocess
 
 from . import config as config_mod
-from . import errors, gate, gitops, goals, logs, queueing
+from . import errors, execpolicy, gate, gitops, goals, logs, queueing
 from .budget import Budget
 from .config import load_config, repo_root
 from .invoke import invoke_model
@@ -183,17 +183,17 @@ def _snapshot(root, allowed_patterns):
 
 
 def _run_safe_commands(cfg, commands, cwd):
+    """Model-requested commands: allowlist-verbatim only, never a shell."""
     allow = (cfg.get("execution", {}) or {}).get("safe_commands") or []
     timeout = int(cfg.get("execution", {}).get("command_timeout_seconds", 900))
     results = []
     for cmd in commands or []:
-        if cmd not in allow:
+        run = execpolicy.run_allowlisted(cmd, allow, cwd, timeout)
+        if run is None:
             results.append({"command": cmd, "skipped": "not on allowlist"})
             continue
-        proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
-                              text=True, timeout=timeout)
-        results.append({"command": cmd, "exit_code": proc.returncode,
-                        "output": (proc.stdout + proc.stderr)[-1000:]})
+        results.append({"command": cmd, "exit_code": run["exit_code"],
+                        "output": (run["stdout"] + run["stderr"])[-1000:]})
     return results
 
 

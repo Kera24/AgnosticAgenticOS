@@ -106,9 +106,85 @@ def run_doctor(cfg=None, env=None):
     if policy not in ("block", "warn", "allow"):
         add("error", "budget.unknown_price_policy must be block|warn|allow")
     if not cfg.get("pricing"):
-        add("warn", "pricing table is empty; with unknown_price_policy=block "
-            "only cost_free providers can run")
+        add("warn", "pricing table is empty; API backends with "
+            "unknown_price_policy=block cannot run (CLI/local backends are "
+            "unaffected)")
+
+    _backend_checks(cfg, add, env)
     return _finish(checks)
+
+
+def _backend_checks(cfg, add, env):
+    """CLI/local/API backend, routing, scheduler, project, breaker and
+    capacity reporting. Auth status via safe CLI status commands only."""
+    from . import projstate
+    from .breaker import BreakerBoard
+    from .scheduler import Scheduler
+    from .setupwiz import detect_backends
+
+    try:
+        detected, apis = detect_backends(cfg)
+    except Exception as exc:
+        add("warn", "backend detection failed: %s" % exc)
+        detected, apis = {}, {}
+    for name, info in detected.items():
+        auth = info.get("auth", "?")
+        level = "ok" if auth == "ok" else "warn"
+        add(level, "backend %s: installed (version %s), auth %s%s" % (
+            name, info.get("version") or "?", auth,
+            ", models: %s" % ", ".join(info.get("models", [])[:5])
+            if info.get("models") else ""))
+    if not detected:
+        add("warn", "no CLI/local backends detected (API-only mode)")
+    for pname, info in apis.items():
+        add("ok" if info["configured"] else "warn",
+            "api backend %s: key %s %s" % (
+                pname, info["api_key_env"],
+                "present" if info["configured"] else "NOT SET"))
+
+    routing = cfg.get("routing") or {}
+    if routing.get("primary"):
+        add("ok", "routing: primary=%s fallbacks=%s (mode=%s)" % (
+            routing["primary"], "->".join(routing.get("fallbacks") or []),
+            routing.get("mode", "simple")))
+    else:
+        add("warn", "routing.primary not configured -- run "
+            "`python .agentic/run setup`")
+
+    memory = str(AGENTIC_DIR / "memory")
+    board = BreakerBoard(memory)
+    for backend, entry in board.data.items():
+        state = entry.get("state", "?")
+        add("ok" if state in ("available", "degraded") else "warn",
+            "breaker %s: %s%s" % (backend, state,
+                                  " until %s" % entry["unavailable_until"]
+                                  if entry.get("unavailable_until") else ""))
+    scheduler = Scheduler(cfg, memory)
+    add("ok", "scheduler: state=%s next_run_at=%s project=%s" % (
+        scheduler.state.get("state"), scheduler.state.get("next_run_at"),
+        scheduler.state.get("project_status")))
+    if projstate.exists(AGENTIC_DIR):
+        progress = projstate.read_yaml(AGENTIC_DIR, "progress.yaml", {}) or {}
+        add("ok", "project: %s tasks, status %s" % (
+            progress.get("tasks_total", "?"),
+            progress.get("tasks_by_status", {})))
+    else:
+        add("ok", "project: none started (use project-start <plan.md>)")
+
+    from .capacity import CapacityLedger
+    ledger = CapacityLedger(cfg, memory)
+    has_history = bool(ledger.recent_cycles(limit=1))
+    add("ok", "capacity confidence: %s (estimates are local approximations, "
+        "never provider-reported quota)"
+        % ("estimated (history available)" if has_history else "unknown"))
+
+    usable = bool(detected) or any(i["configured"] for i in apis.values())
+    if usable and routing.get("primary"):
+        add("ok", "autonomous operation: READY (non-interactive, "
+            "workspace-scoped)")
+    else:
+        add("warn", "autonomous operation: NOT READY -- warnings above must "
+            "be resolved first (warnings are not readiness)")
 
 
 def _finish(checks):

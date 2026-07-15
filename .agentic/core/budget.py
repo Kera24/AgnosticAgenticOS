@@ -27,6 +27,9 @@ class Budget:
         self.run_input_tokens = 0
         self.run_output_tokens = 0
         self.warnings = []
+        # Set when a POST-call check detects exhaustion. The completed call's
+        # result is preserved; the NEXT pre-call check stops the run safely.
+        self.exhausted_reason = None
 
     # -- pricing -----------------------------------------------------------
     def price_entry(self, provider_name, provider_cfg, model):
@@ -91,6 +94,8 @@ class Budget:
             return default
 
     def check_before_run(self):
+        if self.exhausted_reason:
+            raise errors.BudgetExceededError(self.exhausted_reason)
         self._check_daily("before run")
 
     def _check_daily(self, when):
@@ -107,6 +112,8 @@ class Budget:
 
     def check_before_call(self, provider_name, provider_cfg, model, role):
         """Runs before every invocation, including fallbacks."""
+        if self.exhausted_reason:
+            raise errors.BudgetExceededError(self.exhausted_reason)
         self._check_daily("before call for role %s" % role)
         if self.run_cost >= self._limit("per_run_limit_usd", 2):
             raise errors.BudgetExceededError(
@@ -138,5 +145,11 @@ class Budget:
         response["estimated_cost_usd"] = round(cost, 6)
         self.record(role, response.get("provider", "?"),
                     response.get("model", "?"), usage, cost, source, status)
-        self._check_daily("after call")
+        # Post-call limit checks must never destroy the already-paid-for
+        # result or crash the run: record exhaustion, stop at the next gate.
+        try:
+            self._check_daily("after call")
+        except errors.BudgetExceededError as exc:
+            self.exhausted_reason = exc.detail
+            self.warnings.append("budget exhausted after call: %s" % exc.detail)
         return response
