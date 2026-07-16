@@ -43,13 +43,29 @@ def _paths(cfg):
 
 
 def make_caller(cfg, ledger, board, overrides=None, runner=None,
-                transport=None, which=None, env=None, log=None):
-    """Build the single call surface used by every agent role."""
+                transport=None, which=None, env=None, log=None,
+                memory_dir=None):
+    """Build the single call surface used by every agent role. Every prompt
+    is assembled by the Context Broker (ADR 0001) — never ad hoc."""
+    from .context.broker import BrokerError
+    from .context.compose import compose
+    memory_dir = memory_dir or os.path.join(str(config_mod.AGENTIC_DIR),
+                                            "memory")
+
     def call(role, prompt, input_data=None, schema=None, workspace=None,
              permissions="read", timeout=None, chain=None):
         chain = chain or backends.routing_chain(cfg, role, overrides)
+        try:
+            package = compose(cfg, role, prompt, input_data, schema,
+                              memory_dir=memory_dir, backend=chain[0])
+        except BrokerError as exc:
+            err = errors.PolicyError("context broker: %s" % exc)
+            (log or (lambda e: None))({"event": "context_budget_stop",
+                                       "role": role,
+                                       "detail": str(exc)[:300]})
+            return backends.error_result(chain[0], role, err)
         return backends.invoke_backend(
-            cfg, chain[0], role, prompt, input_data=input_data,
+            cfg, chain[0], role, package.rendered, input_data=None,
             output_schema=schema, workspace=workspace,
             permissions=permissions, timeout=timeout, ledger=ledger,
             board=board, fallback_chain=chain[1:], runner=runner,
@@ -64,7 +80,7 @@ def _context(cfg, memory, ledger=None, board=None, overrides=None,
     scheduler = Scheduler(cfg, memory, clock=clock)
     log = lambda event: logs.decision(memory, dict(event, source="project"))
     caller = caller or make_caller(cfg, ledger, board, overrides=overrides,
-                                   log=log, **kw)
+                                   log=log, memory_dir=memory, **kw)
     return ledger, board, scheduler, caller, log
 
 
@@ -82,7 +98,7 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
     ledger, board, scheduler, caller, log = _context(
         cfg, p["memory"], overrides=overrides, caller=caller, clock=clock, **kw)
     snapshot = _snapshot(p["root"], ["**"])
-    result = caller("architect", load_prompt("architect.md"),
+    result = caller("architect", load_prompt("architect.md", shared=False),
                     {"plan": plan, "repository_files": snapshot["file_list"]},
                     schema=_schema("architect.schema.json"),
                     workspace=p["root"], permissions="read")
@@ -267,7 +283,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     # conductor -------------------------------------------------------------------
     worktree = ensure_project_worktree(cfg, p)
     conducted = caller(
-        "conductor", load_prompt("project-conductor.md"),
+        "conductor", load_prompt("project-conductor.md", shared=False),
         {"task": task,
          "architecture": (projstate.read_yaml(a, "progress.yaml", {}) or {}),
          "repository_files": _snapshot(worktree, ["**"])["file_list"][:300],
@@ -377,7 +393,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
 
         # QA review (independent, fresh context) --------------------------------
         qa_input = _review_input(order, worktree, gate_result)
-        qa = caller("qa", load_prompt("qa-review.md"), qa_input,
+        qa = caller("qa", load_prompt("qa-review.md", shared=False), qa_input,
                     schema=_schema("verification.schema.json"),
                     workspace=worktree, permissions="read")
         qa_out = qa["structured_output"] if qa["ok"] else None
@@ -405,7 +421,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     changed = gitops.changed_files(worktree)
     diff = gitops.diff_text(worktree)
     if security_review_required(task, changed, diff):
-        sec = caller("security", load_prompt("security-review.md"),
+        sec = caller("security", load_prompt("security-review.md", shared=False),
                      _review_input(order, worktree, gate_result),
                      schema=_schema("security-review.schema.json"),
                      workspace=worktree, permissions="read")
@@ -452,7 +468,7 @@ def _invoke_coder(cfg, caller, coder_input, worktree, chain):
     primary_type = (cfg.get("backends") or {}).get(chain[0], {}).get("type",
                                                                      "api")
     if primary_type == "cli":
-        result = caller("coder", load_prompt("coder-cli.md"), coder_input,
+        result = caller("coder", load_prompt("coder-cli.md", shared=False), coder_input,
                         schema=None, workspace=worktree, permissions="write",
                         chain=chain)
         if result["ok"]:
@@ -462,7 +478,7 @@ def _invoke_coder(cfg, caller, coder_input, worktree, chain):
                 result["blocker"] = content.strip()[8:250].strip()
             result["edits"] = None   # CLI edited files itself
         return result
-    result = caller("coder", load_prompt("implement.md"), coder_input,
+    result = caller("coder", load_prompt("implement.md", shared=False), coder_input,
                     schema=_schema("worker.schema.json"), workspace=worktree,
                     permissions="write", chain=chain)
     if result["ok"]:
@@ -607,7 +623,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
         os.path.exists(os.path.join(worktree, ".env.example")))
     review = None
     if all(checks.values()) and caller is not None:
-        final = caller("qa", load_prompt("qa-review.md"),
+        final = caller("qa", load_prompt("qa-review.md", shared=False),
                        {"work_order": {"item": "final project audit",
                                        "done_when": [
                                            {"id": "C-%d" % i, "condition": c}

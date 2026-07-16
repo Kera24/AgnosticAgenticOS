@@ -124,6 +124,35 @@ providers:
   #   type: custom_command
   #   command: ["my-model-cli", "--json"]
 
+# Context Broker (ADR 0001): the only component that assembles model input.
+# Budgets are hard ceilings; the output reserve is protected before any
+# input is selected. Token counts are conservative local ESTIMATES
+# (chars/4 * safety_multiplier) unless a provider tokenizer is registered.
+context:
+  enabled: true
+  default_input_budget_tokens: 64000
+  reserved_output_tokens: 12000
+  safety_multiplier: 1.20
+  deduplicate: true
+  include_provenance: true
+
+  allocation:                     # optional-content caps, % of input budget
+    stable_policy_percent: 10
+    task_percent: 15
+    code_percent: 35
+    memory_percent: 10
+    skills_percent: 10
+    output_reserve_percent: 20
+
+  overflow:
+    strategy: relevance_then_compress
+    fail_if_mandatory_content_exceeds_budget: true
+
+  # per-role overrides, e.g.:
+  # roles:
+  #   coder: {default_input_budget_tokens: 96000}
+  roles: {}
+
 budget:
   daily_limit_usd: 5
   per_run_limit_usd: 2

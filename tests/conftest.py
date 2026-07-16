@@ -145,7 +145,8 @@ class FakeInvoker:
         self.calls = []
 
     def __call__(self, role, prompt, input_data, output_schema, budget):
-        self.calls.append({"role": role, "input": input_data})
+        self.calls.append({"role": role, "input": input_data,
+                           "prompt": prompt})
         outputs = self.by_role.get(role)
         assert outputs, "no scripted output for role %r" % role
         structured = outputs.pop(0) if len(outputs) > 1 else outputs[0]

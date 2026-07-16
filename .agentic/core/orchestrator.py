@@ -229,10 +229,28 @@ def run_tick(cfg=None, dry_run=False, invoker=None, transport=None, env=None,
     log = lambda event: logs.decision(memory, dict(event, run_id=run_id))
 
     def call(role, prompt, input_data, schema):
+        # every prompt goes through the Context Broker; the raw input_data
+        # is still handed to injected test invokers for observability
+        from .context.broker import BrokerError
+        from .context.compose import compose
+        try:
+            package = compose(cfg, role, prompt, input_data, schema,
+                              memory_dir=memory)
+        except BrokerError as exc:
+            log({"event": "context_budget_stop", "role": role,
+                 "detail": str(exc)[:300]})
+            err = errors.PolicyError("context broker: %s" % exc)
+            return {"ok": False, "provider": "?", "model": "?", "content": "",
+                    "structured_output": {}, "usage": {"input_tokens": 0,
+                                                       "output_tokens": 0,
+                                                       "cached_tokens": 0},
+                    "estimated_cost_usd": 0.0, "finish_reason": "error",
+                    "refusal": False, "error": err.as_dict()}
         if invoker is not None:
-            return invoker(role=role, prompt=prompt, input_data=input_data,
-                           output_schema=schema, budget=budget)
-        return invoke_model(cfg, role, prompt, input_data=input_data,
+            return invoker(role=role, prompt=package.rendered,
+                           input_data=input_data, output_schema=schema,
+                           budget=budget)
+        return invoke_model(cfg, role, package.rendered, input_data=None,
                             output_schema=schema, budget=budget,
                             transport=transport, log=log, env=env)
 
@@ -262,7 +280,7 @@ def run_tick(cfg=None, dry_run=False, invoker=None, transport=None, env=None,
                    "%s: %s" % (violation["id"], violation["detail"]))
 
     # 2. triage
-    triage = call("triage", load_prompt("triage.md"), context,
+    triage = call("triage", load_prompt("triage.md", shared=False), context,
                   _schema("triage.schema.json"))
     if not triage["ok"]:
         kind = (triage.get("error") or {}).get("kind", "?")
@@ -293,7 +311,7 @@ def run_tick(cfg=None, dry_run=False, invoker=None, transport=None, env=None,
         "contract_must_queue": "see contract.md sections MUST QUEUE",
         "protected_path_patterns": protected[:50],
     }
-    conducted = call("conductor", load_prompt("conductor.md"), conductor_input,
+    conducted = call("conductor", load_prompt("conductor.md", shared=False), conductor_input,
                      _schema("work-order.schema.json"))
     if not conducted["ok"]:
         return finish("conductor_failed",
@@ -346,7 +364,7 @@ def run_tick(cfg=None, dry_run=False, invoker=None, transport=None, env=None,
     # 7. worker
     worker_input = {"work_order": order,
                     "repository": _snapshot(worktree, order["allowed_paths"])}
-    worked = call("worker", load_prompt("implement.md"), worker_input,
+    worked = call("worker", load_prompt("implement.md", shared=False), worker_input,
                   _schema("worker.schema.json"))
     if not worked["ok"]:
         gitops.remove_worktree(p["root"], worktree, branch) if worktree_enabled else None
@@ -418,7 +436,7 @@ def run_tick(cfg=None, dry_run=False, invoker=None, transport=None, env=None,
             "known_failing_baseline": verdict_vs_baseline["known_failing"]},
         "safe_command_results": command_results,
     }
-    verified = call("verifier", load_prompt("verify.md"), verifier_input,
+    verified = call("verifier", load_prompt("verify.md", shared=False), verifier_input,
                     _schema("verification.schema.json"))
     verifier_out = verified["structured_output"] if verified["ok"] else None
     verdict = (verifier_out or {}).get("verdict", "uncertain")

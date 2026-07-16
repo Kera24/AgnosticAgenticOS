@@ -21,6 +21,9 @@
 .agentic/memory/trust-by-model.tsv
 .agentic/project/project.lock
 
+# context-package ledger (ids/counts/reasons only, but machine-local)
+.agentic/memory/context-ledger.jsonl
+
 # mutable memory ledgers (created on demand; templates ship in git history)
 .agentic/memory/STATE.md
 .agentic/memory/decisions.jsonl
