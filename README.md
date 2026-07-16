@@ -407,6 +407,110 @@ from model output must match the allowlist verbatim and never get a shell.
 - Clean distribution: `python .agentic/run package` builds a zip that
   excludes runs, worktrees, machine config, memory ledgers, and caches.
 
+## Control Centre dashboard
+
+A local web dashboard — the **Agentic OS Control Centre** — provides a
+control and observation layer over the same orchestration engine. It never
+reimplements orchestration logic; every number it shows comes from the
+Python modules and the YAML/JSON/TSV state they maintain.
+
+```powershell
+py .agentic/run ui              # start on http://127.0.0.1:8765
+py .agentic/run ui --port 9000  # different port
+py .agentic/run ui --no-open    # don't open the browser
+```
+
+The command starts a loopback-only FastAPI service, serves the built
+frontend, prints the URL, optionally opens your browser, and shuts down
+cleanly on Ctrl+C. If the preferred port is busy it scans upward safely.
+
+**Pages:** Overview (live orchestration rail: Architect → Conductor → Coder
+→ Gate → QA → Security → Commit), Projects (create/preview/start plans,
+architecture, backlog, acceptance criteria, decisions, final audit), Build
+Control (start/pause/resume/audit with disabled-state explanations),
+Agents (roles, permissions, routing editor), Backends (detection, auth
+status as reported by each CLI, breaker states, confirmed smoke tests),
+Capacity (reported vs estimated vs unknown — estimates are never presented
+as provider quotas), Verification (deterministic checks, baseline vs
+regression, QA/security verdicts, full logs), Activity (filterable audit
+trail), Settings (validated machine-local configuration).
+
+A command palette (`Ctrl+K`) exposes navigation and safe project actions;
+invalid actions are disabled with the reason shown.
+
+### Building the frontend
+
+The dashboard frontend is a Vite + React + TypeScript app in `ui/`
+(requires Node.js 20+):
+
+```powershell
+cd ui
+npm install
+npm run build     # writes ui/dist, served by `py .agentic/run ui`
+```
+
+Development mode (hot reload, API proxied to the Python service):
+
+```powershell
+py .agentic/run ui --dev --no-open   # terminal 1: API on 8765
+cd ui; npm run dev                   # terminal 2: UI on 127.0.0.1:5173
+```
+
+Frontend checks: `npm run test`, `npm run typecheck`, `npm run lint`,
+`npm run build` (all inside `ui/`).
+
+### Dashboard security boundaries
+
+- Binds to `127.0.0.1` only; non-loopback hosts are refused outright
+  because no remote authentication layer exists (by design).
+- Every request must carry a loopback `Host`; state-changing browser
+  requests must carry a loopback `Origin` (CSRF defence).
+- No arbitrary command endpoint and no arbitrary filesystem endpoint:
+  plan paths must resolve inside the repository root; log access is
+  confined to `.agentic/runs/` with strict name validation.
+- All content that could contain model/CLI output is redacted before it
+  reaches the browser; credential files and environment values are never
+  read or returned; `auth unknown` is never treated as authenticated.
+- The dashboard has **no push, merge or deploy capability** — reviewing
+  and merging `agentic/project` stays a human act in your terminal.
+- Smoke tests and breaker resets require explicit confirmation (smoke
+  tests consume real subscription allowance or API cost).
+- Every state-changing dashboard action is appended to the audit trail
+  (`decisions.jsonl`, `source: dashboard`).
+- Settings persist only to `.agentic/config.machine.yaml` (git-ignored);
+  credential-shaped keys and values are rejected server-side.
+
+### Dashboard configuration
+
+Set in Settings (validated) or `.agentic/config.machine.yaml`:
+
+```yaml
+ui:
+  port: 8765          # default dashboard port
+  open_browser: true  # open browser on start
+  theme: dark         # dark | light
+  reduced_motion: system   # system | true | false
+```
+
+**Windows notes:** run with `py .agentic/run ui` from PowerShell; paths
+with spaces (incl. OneDrive folders) are supported; no Make or Bash is
+required. Stop with a single Ctrl+C.
+
+**Troubleshooting:** if the page shows "built frontend not found", build
+`ui/` as above (the API still runs without it). If the live badge shows
+"connection lost", the Python process stopped — restart it; the browser
+reconnects and replays missed events. To disable the dashboard entirely,
+simply never run `run ui` — nothing starts it automatically. To clear only
+dashboard cache safely, delete `.agentic/memory/ui-operations.json` (the
+list of recent dashboard-initiated operations) — project state, capacity
+ledgers and the audit trail are untouched.
+
+The design system behind the interface is documented in
+`design-system/MASTER.md` (tokens, typography, status semantics, motion
+and accessibility rules) with page-specific notes in
+`design-system/pages/`. The dashboard requires `fastapi` and `uvicorn`
+(`pip install fastapi uvicorn`).
+
 ## Tests
 
 `make agent-test` — 103 tests, all CLI processes and API transports mocked

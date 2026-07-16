@@ -1,0 +1,134 @@
+/* Agentic OS Control Centre — design tokens.
+   Source of truth: design-system/MASTER.md. Components never use raw hex. */
+
+:root,
+:root[data-theme="dark"] {
+  /* surfaces & structure */
+  --bg-base: #141518;
+  --bg-sunken: #101114;
+  --bg-raised: #1b1d21;
+  --bg-overlay: #222429;
+  --bg-hover: #25272c;
+  --border-hairline: #2a2d33;
+  --border-strong: #3a3e46;
+  --text-primary: #e9e8e4;
+  --text-secondary: #a9acb4;
+  --text-muted: #787c85;
+
+  /* accent */
+  --accent: #53c7e8;
+  --accent-strong: #7cd6f0;
+  --accent-dim: rgba(83, 199, 232, 0.14);
+  --accent-contrast: #0c2530;
+
+  /* status semantics — always paired with icon + label in the UI */
+  --status-ok: #5cd08c;
+  --status-ok-dim: rgba(92, 208, 140, 0.13);
+  --status-run: #53c7e8;
+  --status-run-dim: rgba(83, 199, 232, 0.13);
+  --status-cool: #9db4ee;
+  --status-cool-dim: rgba(157, 180, 238, 0.13);
+  --status-warn: #e5b45b;
+  --status-warn-dim: rgba(229, 180, 91, 0.13);
+  --status-block: #ee9159;
+  --status-block-dim: rgba(238, 145, 89, 0.14);
+  --status-fail: #ec7070;
+  --status-fail-dim: rgba(236, 112, 112, 0.13);
+  --status-idle: #8a8f98;
+  --status-idle-dim: rgba(138, 143, 152, 0.13);
+
+  /* elevation */
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(10, 11, 13, 0.6);
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg-base: #f4f4f2;
+  --bg-sunken: #ebebe8;
+  --bg-raised: #ffffff;
+  --bg-overlay: #ffffff;
+  --bg-hover: #ececea;
+  --border-hairline: #dcdcd7;
+  --border-strong: #bfbfb8;
+  --text-primary: #1f2126;
+  --text-secondary: #565a63;
+  --text-muted: #83878f;
+
+  --accent: #0e7fa6;
+  --accent-strong: #0a6a8c;
+  --accent-dim: rgba(14, 127, 166, 0.12);
+  --accent-contrast: #ffffff;
+
+  --status-ok: #177d43;
+  --status-ok-dim: rgba(23, 125, 67, 0.12);
+  --status-run: #0e7fa6;
+  --status-run-dim: rgba(14, 127, 166, 0.12);
+  --status-cool: #3c5cc0;
+  --status-cool-dim: rgba(60, 92, 192, 0.11);
+  --status-warn: #92660e;
+  --status-warn-dim: rgba(146, 102, 14, 0.12);
+  --status-block: #b04e13;
+  --status-block-dim: rgba(176, 78, 19, 0.12);
+  --status-fail: #bb3434;
+  --status-fail-dim: rgba(187, 52, 52, 0.11);
+  --status-idle: #6a6e77;
+  --status-idle-dim: rgba(106, 110, 119, 0.12);
+
+  --shadow-2: 0 4px 16px rgba(30, 32, 36, 0.12);
+  --shadow-3: 0 12px 40px rgba(30, 32, 36, 0.18);
+  --scrim: rgba(40, 42, 46, 0.4);
+
+  color-scheme: light;
+}
+
+:root {
+  /* typography */
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+
+  --type-display: 500 26px/32px var(--font-mono);
+  --type-h1: 600 19px/26px var(--font-sans);
+  --type-h2: 600 15px/22px var(--font-sans);
+  --type-body: 400 13.5px/20px var(--font-sans);
+  --type-data: 400 12.5px/18px var(--font-mono);
+  --type-label: 500 11px/16px var(--font-mono);
+  --type-caption: 400 12px/16px var(--font-sans);
+  --label-tracking: 0.08em;
+
+  /* spacing (density dial 8: dense dashboard) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* radius — no pills */
+  --radius-panel: 6px;
+  --radius-control: 4px;
+  --radius-chip: 3px;
+
+  /* motion (subtle tier) */
+  --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 260ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 1ms;
+    --dur-2: 1ms;
+    --dur-3: 1ms;
+  }
+}
+
+:root[data-motion="reduced"] {
+  --dur-1: 1ms;
+  --dur-2: 1ms;
+  --dur-3: 1ms;
+}

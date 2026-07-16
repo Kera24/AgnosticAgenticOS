@@ -31,7 +31,15 @@
 # distribution archives
 agentic-os-dist.zip
 
+# dashboard runtime state
+.agentic/memory/ui-operations.json
+
 # python
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# frontend
+ui/node_modules/
+ui/dist/
+ui/*.tsbuildinfo

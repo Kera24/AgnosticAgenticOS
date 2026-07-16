@@ -16,6 +16,8 @@ Full-project build:
   python .agentic/run capacity          capacity ledger + next-cycle estimate
   python .agentic/run backends          backend circuit-breaker states
   python .agentic/run package           clean distributable archive
+  python .agentic/run ui                local Control Centre dashboard
+                                        (--port N --no-open; loopback only)
 
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
@@ -219,6 +221,13 @@ def cmd_package(cfg, args):
     return 0
 
 
+def cmd_ui(cfg, args):
+    from ui.serve import run_ui
+    return run_ui(cfg, port=args.port,
+                  open_browser=False if args.no_open else None,
+                  dev_origin=args.dev)
+
+
 COMMANDS = {
     "doctor": cmd_doctor, "tick": cmd_tick, "queue": cmd_queue,
     "trust": cmd_trust, "audit": cmd_audit, "goals": cmd_goals,
@@ -226,7 +235,7 @@ COMMANDS = {
     "project-run": cmd_project_run, "project-resume": cmd_project_resume,
     "project-status": cmd_project_status, "project-pause": cmd_project_pause,
     "project-review": cmd_project_review, "capacity": cmd_capacity,
-    "backends": cmd_backends, "package": cmd_package,
+    "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
 }
 
 
@@ -240,6 +249,9 @@ def main(argv):
     parser.add_argument("--profile")
     parser.add_argument("--max-cycles", type=int, default=1)
     parser.add_argument("--no-smoke", action="store_true")
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--no-open", action="store_true")
+    parser.add_argument("--dev", action="store_true")
     parser.add_argument("-h", "--help", action="store_true")
     args = parser.parse_args(argv)
     if args.help or not args.command:
