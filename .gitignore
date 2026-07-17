@@ -39,6 +39,9 @@ memory-export.json
 .agentic/memory/trust.tsv
 .agentic/memory/goal-ledger.tsv
 
+# volatile Obsidian workspace state (user's editor state, not knowledge)
+.agentic/knowledge/.obsidian/
+
 # distribution archives
 agentic-os-dist.zip
 

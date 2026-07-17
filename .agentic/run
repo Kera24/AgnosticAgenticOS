@@ -32,6 +32,9 @@ Memory (progressive disclosure):
   python .agentic/run memory show <id...>
   python .agentic/run memory forget <id>
 
+Knowledge vault (Obsidian-compatible):
+  python .agentic/run knowledge status|rebuild|validate|open
+
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
 """
@@ -322,6 +325,34 @@ def cmd_memory(cfg, args):
     return 2
 
 
+def cmd_knowledge(cfg, args):
+    """knowledge status | rebuild | validate | open"""
+    from core.knowledge import KnowledgeVault
+    vault = KnowledgeVault(cfg, str(AGENTIC_DIR))
+    sub = args.plan or "status"
+    if sub == "status":
+        _print(vault.status())
+        return 0
+    if sub == "rebuild":
+        _print(vault.rebuild())
+        return 0
+    if sub == "validate":
+        issues = vault.validate()
+        _print({"ok": not issues, "issues": issues})
+        return 0 if not issues else 1
+    if sub == "open":
+        # explicit user action only — autonomous cycles never call this
+        if os.name == "nt":
+            os.startfile(vault.root)          # noqa: S606
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", vault.root])
+        print("opened %s" % vault.root)
+        return 0
+    print("unknown knowledge subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_ui(cfg, args):
     from ui.serve import run_ui
     return run_ui(cfg, port=args.port,
@@ -338,6 +369,7 @@ COMMANDS = {
     "project-review": cmd_project_review, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
     "context": cmd_context, "memory": cmd_memory,
+    "knowledge": cmd_knowledge,
 }
 
 

@@ -173,6 +173,13 @@ memory:
   retention_days: 180
   inject_limit: 8
 
+# Obsidian-compatible knowledge vault (ADR 0004): human-readable Markdown
+# generated deterministically under .agentic/knowledge/. `path: null` means
+# the default location. Open it as an Obsidian vault or read it as files.
+knowledge:
+  enabled: true
+  path: null
+
 budget:
   daily_limit_usd: 5
   per_run_limit_usd: 2

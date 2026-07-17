@@ -62,6 +62,9 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
                                         which=which)
             retrieved += memory_items(cfg, memory_dir,
                                       retrieval_query(input_data))
+            from .knowledge import knowledge_items
+            retrieved += knowledge_items(cfg, str(config_mod.AGENTIC_DIR),
+                                         retrieval_query(input_data))
             package = compose(cfg, role, prompt, input_data, schema,
                               memory_dir=memory_dir, backend=chain[0],
                               extra_items=retrieved)
@@ -134,6 +137,8 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
     projstate.refresh_progress(a)
     scheduler.set_project_status("in_progress")
     _index_project(cfg, p["root"], p["memory"], log, full=True)
+    from .knowledge import update_knowledge
+    update_knowledge(cfg, a, log)
     log({"event": "project_started", "tasks": len(tasks),
          "milestones": len(out["milestones"])})
     for decision in out.get("human_decisions", []):
@@ -256,6 +261,8 @@ def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
          "detail": redact(str(detail))[:300],
          "cooling_until": until.isoformat(timespec="seconds")})
     progress = projstate.refresh_progress(p["agentic"])
+    from .knowledge import update_knowledge
+    update_knowledge(cfg, p["agentic"], log)
     result = {"status": outcome, "run_id": run_id,
               "task": (task or {}).get("id"), "detail": detail,
               "cooling_until": until.isoformat(timespec="seconds"),
@@ -721,6 +728,8 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
              "completion_criteria": criteria.get("completion_criteria", []),
              "branch": PROJECT_BRANCH}
     projstate.write_yaml(a, "final-audit.yaml", audit)
+    from .knowledge import update_knowledge
+    update_knowledge(cfg, a, log)
     if complete:
         scheduler.mark_complete()
         notify.notify(cfg, "project_complete", "Application ready for review",
