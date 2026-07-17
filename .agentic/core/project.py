@@ -36,6 +36,19 @@ PROJECT_WORKTREE = "project"
 
 
 def _paths(cfg):
+    """ProjectPaths authority. Without a runtime overlay the platform
+    repository remains the implicit project (legacy behaviour). With
+    `cfg["runtime"]["project_dir"]` (set by the project registry) every
+    state directory redirects to the machine-local runtime home while
+    prompts/schemas/guardrails stay with the platform installation."""
+    runtime = cfg.get("runtime") or {}
+    base = runtime.get("project_dir")
+    if base:
+        return {"agentic": str(base),
+                "memory": os.path.join(str(base), "memory"),
+                "queue": os.path.join(str(base), "queue"),
+                "runs": os.path.join(str(base), "runs"),
+                "root": str(config_mod.repo_root(cfg))}
     a = str(config_mod.AGENTIC_DIR)
     return {"agentic": a, "memory": os.path.join(a, "memory"),
             "queue": os.path.join(a, "queue"), "runs": os.path.join(a, "runs"),
@@ -309,7 +322,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     started_at = _dt.datetime.now()
     run_dir = os.path.join(p["runs"], "cycle-" + run_id)
     os.makedirs(run_dir, exist_ok=True)
-    protected = gitops.load_protected_paths(cfg, a)
+    # guardrails are OS policy: always read from the platform install,
+    # even when project state is redirected to the runtime home
+    protected = gitops.load_protected_paths(cfg, str(config_mod.AGENTIC_DIR))
 
     task = projstate.next_task(a)
     if task is None:

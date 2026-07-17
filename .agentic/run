@@ -7,6 +7,16 @@ Repository maintenance:
   python .agentic/run dry-run           analyse + work order, no edits
   python .agentic/run queue|trust|audit|goals
 
+Multi-project registry (external application folders):
+  python .agentic/run project list
+  python .agentic/run project add    --name "App" --root C:\path [--plan-file plan.md]
+  python .agentic/run project create --name "App" --root C:\path
+  python .agentic/run project init|start|show|doctor|pause|resume|stop <id>
+  python .agentic/run project archive|remove|open <id>
+  python .agentic/run project relink <id> --root <new-path>
+  python .agentic/run project adopt-legacy
+  (bin\agentic.cmd wraps this entry point: `agentic project list`)
+
 Full-project build:
   python .agentic/run setup             interactive machine configuration
   python .agentic/run project-start plan.md
@@ -151,11 +161,26 @@ def cmd_project_start(cfg, args):
     return 0 if result["status"] in ("started",) else 1
 
 
+def _apply_project_overlay(cfg, args):
+    """--project <id>: run the command against a registered project's
+    redirected state instead of the platform-implicit project."""
+    if not getattr(args, "project_id", None):
+        return cfg, MEMORY
+    from core import projectops
+    from core.registry import ProjectRegistry
+    registry = ProjectRegistry()
+    record = registry.get(args.project_id)
+    proj_cfg = projectops.project_cfg_for(cfg, registry, record)
+    memory = os.path.join(proj_cfg["runtime"]["project_dir"], "memory")
+    return proj_cfg, memory
+
+
 def cmd_project_run(cfg, args):
     from core.project import project_run
+    cfg, memory = _apply_project_overlay(cfg, args)
     if args.now:
         from core.scheduler import Scheduler
-        Scheduler(cfg, MEMORY).resume(force=True)
+        Scheduler(cfg, memory).resume(force=True)
         print("cooling override: next cycle may start immediately")
     result = project_run(cfg, overrides=_overrides(args),
                          max_cycles=args.max_cycles)
@@ -173,6 +198,7 @@ def cmd_project_resume(cfg, args):
 
 def cmd_project_status(cfg, args):
     from core.project import project_status
+    cfg, _memory = _apply_project_overlay(cfg, args)
     _print(project_status(cfg))
     return 0
 
@@ -252,6 +278,148 @@ def cmd_package(cfg, args):
     print("wrote %s (%d files, local artefacts excluded)"
           % (out, len(zf.namelist())))
     return 0
+
+
+def cmd_project(cfg, args):
+    """project list|add|create|show|doctor|init|start|pause|resume|stop|
+    archive|remove|relink|open|adopt-legacy|authorise-root"""
+    from core import projectops
+    from core.registry import ProjectRegistry, RegistryError
+    registry = ProjectRegistry()
+    sub = args.plan or "list"
+    extra = args.extra or []
+    ident = extra[0] if extra else None
+    try:
+        if sub == "list":
+            rows = registry.list()
+            if not rows:
+                print("(no projects registered — use `project add` or "
+                      "`project create`)")
+                return 0
+            print("%-24s %-12s %-4s %-3s %s"
+                  % ("ID", "STATUS", "PRIO", "ON", "ROOT"))
+            for r in rows:
+                print("%-24s %-12s %-4s %-3s %s"
+                      % (r["id"], r["status"], r.get("priority"),
+                         "yes" if r.get("enabled") else "no",
+                         r["root_path"]))
+            return 0
+        if sub in ("add", "create"):
+            if not args.name or not args.root:
+                print("usage: project %s --name <name> --root <path> "
+                      "[--plan-file plan.md] [--priority N]" % sub,
+                      file=sys.stderr)
+                return 2
+            record = registry.add(args.name, args.root,
+                                  plan=args.plan_file or "plan.md",
+                                  create=(sub == "create"),
+                                  priority=args.priority or 50,
+                                  allow_platform=args.allow_platform)
+            if sub == "create":
+                plan_path = os.path.join(record["root_path"],
+                                         record["plan_path"])
+                if not os.path.exists(plan_path):
+                    with open(plan_path, "w", encoding="utf-8") as fh:
+                        fh.write("# %s\n\nDescribe the application to "
+                                 "build here.\n" % record["name"])
+                _print(projectops.project_init(cfg, registry, record["id"]))
+            _print(registry.get(record["id"]))
+            print("\nnext: py .agentic/run project init %s" % record["id"])
+            return 0
+        if sub == "adopt-legacy":
+            _print(projectops.adopt_legacy(
+                cfg, registry, name=args.name or "platform-legacy"))
+            return 0
+        if sub == "authorise-root":
+            if not args.root:
+                print("usage: project authorise-root --root <path>",
+                      file=sys.stderr)
+                return 2
+            _print({"authorised_roots": registry.authorise_root(args.root)})
+            return 0
+        record = projectops.resolve_project(registry, ident)
+        pid = record["id"]
+        if sub == "show":
+            _print(projectops.project_status(cfg, registry, pid))
+            return 0
+        if sub == "doctor":
+            report = projectops.project_doctor(cfg, registry, pid)
+            for level, message in report["checks"]:
+                print("[%s] %s" % (level, message))
+            print("\nproject doctor:", "OK" if report["ok"] else "FAILED")
+            return 0 if report["ok"] else 1
+        if sub == "init":
+            result = projectops.project_init(cfg, registry, pid)
+            _print(result)
+            return 0 if result["ok"] else 1
+        if sub == "start":
+            from core import projstate
+            from core.project import project_start
+            proj_cfg = projectops.project_cfg_for(cfg, registry, record)
+            state_dir = proj_cfg["runtime"]["project_dir"]
+            registry.update(pid, enabled=True)
+            if not projstate.exists(state_dir):
+                plan = projectops.find_plan(record)
+                if not plan:
+                    print("no plan file found; add one and re-run",
+                          file=sys.stderr)
+                    return 1
+                result = project_start(proj_cfg, plan,
+                                       overrides=_overrides(args))
+                _print(result)
+                if result["status"] != "started":
+                    return 1
+            print("project %s enabled; cycles run via the scheduler or "
+                  "`project-run --project %s`" % (pid, pid))
+            return 0
+        if sub in ("pause", "resume", "stop"):
+            from core.scheduler import Scheduler
+            proj_cfg = projectops.project_cfg_for(cfg, registry, record)
+            memdir = os.path.join(proj_cfg["runtime"]["project_dir"],
+                                  "memory")
+            scheduler = Scheduler(proj_cfg, memdir)
+            if sub == "pause":
+                scheduler.pause()
+            elif sub == "resume":
+                scheduler.resume(force=True)
+                registry.update(pid, enabled=True)
+            else:
+                scheduler.pause()
+                registry.update(pid, enabled=False)
+            _print({"project": pid, "action": sub,
+                    "scheduler": scheduler.state["state"],
+                    "enabled": registry.get(pid)["enabled"]})
+            return 0
+        if sub == "archive":
+            _print(registry.archive(pid))
+            return 0
+        if sub == "remove":
+            _print(registry.remove(pid))
+            return 0
+        if sub == "relink":
+            if not args.root:
+                print("usage: project relink <id> --root <new-path>",
+                      file=sys.stderr)
+                return 2
+            _print(registry.relink(pid, args.root,
+                                   allow_platform=args.allow_platform))
+            return 0
+        if sub == "open":
+            registry.update(pid, last_opened_at=registry.clock())
+            if os.name == "nt":
+                os.startfile(record["root_path"])   # noqa: S606
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", record["root_path"]])
+            print("opened %s" % record["root_path"])
+            return 0
+    except RegistryError as exc:
+        print("project error: %s"
+              % (exc.detail if hasattr(exc, "detail") else exc),
+              file=sys.stderr)
+        return 1
+    print("unknown project subcommand %r" % sub, file=sys.stderr)
+    return 2
 
 
 def cmd_context(cfg, args):
@@ -445,6 +613,7 @@ COMMANDS = {
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
     "context": cmd_context, "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
+    "project": cmd_project,
 }
 
 
@@ -462,6 +631,12 @@ def main(argv):
     parser.add_argument("--revision")
     parser.add_argument("--now", action="store_true",
                         help="clear cooling and start immediately")
+    parser.add_argument("--name")
+    parser.add_argument("--root")
+    parser.add_argument("--plan-file", dest="plan_file")
+    parser.add_argument("--priority", type=int)
+    parser.add_argument("--allow-platform", action="store_true")
+    parser.add_argument("--project", dest="project_id")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--dev", action="store_true")
