@@ -25,6 +25,22 @@ class OpenAIProvider(BaseProvider):
         return headers
 
     def _messages(self, prompt, input_data):
+        from core.context.broker import split_cache_boundary
+        prefix, dynamic = split_cache_boundary(prompt)
+        if dynamic is not None:
+            # OpenAI-style prefix caching is automatic for exact prefixes:
+            # keep the stable prefix as the system message (byte-identical
+            # across calls), dynamic content in the user turn. No cache
+            # fields exist to send; usage reports cached_tokens when it
+            # actually happened.
+            user = dynamic
+            if input_data is not None:
+                if not isinstance(input_data, str):
+                    input_data = json.dumps(input_data, ensure_ascii=False,
+                                            indent=2)
+                user = dynamic + "\n\n" + input_data
+            return [{"role": "system", "content": prefix},
+                    {"role": "user", "content": user}]
         messages = [{"role": "system", "content": prompt}]
         if input_data is not None:
             if not isinstance(input_data, str):

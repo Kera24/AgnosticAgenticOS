@@ -32,8 +32,10 @@ class CustomCommandProvider(BaseProvider):
                                        provider=self.name, model=model)
         if isinstance(command, str):
             command = command.split()
+        from core.context.broker import strip_cache_boundary
         request = json.dumps({
-            "model": model, "prompt": prompt, "input": input_data,
+            "model": model, "prompt": strip_cache_boundary(prompt),
+            "input": input_data,
             "max_output_tokens": max_output_tokens, "temperature": temperature,
         })
         try:

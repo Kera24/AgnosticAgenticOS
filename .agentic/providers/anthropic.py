@@ -20,8 +20,11 @@ class AnthropicProvider(BaseProvider):
     DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
     API_VERSION = "2023-06-01"
 
+    VALID_CACHE_TTLS = ("5m", "1h")
+
     def invoke(self, model, prompt, input_data=None, tools=None, timeout=120,
                max_output_tokens=None, temperature=0):
+        from core.context.broker import split_cache_boundary
         if input_data is not None and not isinstance(input_data, str):
             input_data = json.dumps(input_data, ensure_ascii=False, indent=2)
         payload = {
@@ -29,7 +32,23 @@ class AnthropicProvider(BaseProvider):
             "max_tokens": int(max_output_tokens or 4096),
             "temperature": temperature,
         }
-        if input_data is not None:
+        prefix, dynamic = split_cache_boundary(prompt)
+        if dynamic is not None:
+            # broker-marked stable prefix: cache it explicitly (Anthropic
+            # cache_control breakpoint with a configurable TTL)
+            block = {"type": "text", "text": prefix}
+            if self.cfg.get("cache_enabled", True):
+                control = {"type": "ephemeral"}
+                ttl = str(self.cfg.get("cache_ttl", "5m"))
+                if ttl in self.VALID_CACHE_TTLS and ttl != "5m":
+                    control["ttl"] = ttl   # 5m is the API default; only
+                                           # send ttl when it deviates
+                block["cache_control"] = control
+            payload["system"] = [block]
+            user_text = dynamic if input_data is None \
+                else dynamic + "\n\n" + input_data
+            payload["messages"] = [{"role": "user", "content": user_text}]
+        elif input_data is not None:
             payload["system"] = prompt
             payload["messages"] = [{"role": "user", "content": input_data}]
         else:
@@ -57,8 +76,13 @@ class AnthropicProvider(BaseProvider):
             "cached_tokens": usage_raw.get("cache_read_input_tokens", 0),
         }
         refusal = detect_refusal(content, finish, stop_reason == "refusal")
-        return self.normalize(data.get("model", model), content, usage,
-                              finish, refusal)
+        response = self.normalize(data.get("model", model), content, usage,
+                                  finish, refusal)
+        # cache-creation usage is provider-reported evidence; never invented
+        if usage_raw.get("cache_creation_input_tokens") is not None:
+            response["usage"]["cache_creation_tokens"] = \
+                usage_raw.get("cache_creation_input_tokens", 0)
+        return response
 
     def _map_anthropic_error(self, status, text, model):
         low = (text or "").lower()

@@ -181,6 +181,12 @@ class CLIBackendBase:
 
 
 def compose_prompt(prompt, input_data):
+    # Subscription CLIs get one flat prompt. The broker's cache-boundary
+    # marker is stripped: we make no claim of controlling provider-side
+    # caching for CLIs — the stable prefix ordering is still consistent,
+    # and cache status remains honestly "unknown".
+    from core.context.broker import strip_cache_boundary
+    prompt = strip_cache_boundary(prompt)
     if input_data is None:
         return prompt
     if not isinstance(input_data, str):

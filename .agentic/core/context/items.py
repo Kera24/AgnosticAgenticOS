@@ -120,6 +120,7 @@ class ContextPackage:
         self.included_reasons = {}             # item id -> reason
         self.rendered = None                   # final prompt string
         self.stable_prefix_chars = 0           # length of the cacheable prefix
+        self.candidate_total_tokens = 0        # all candidates pre-selection
         self.created_at = _now_iso()
 
     def items(self):
@@ -133,6 +134,11 @@ class ContextPackage:
     def summary(self):
         """Ledger-safe summary: ids, categories, sizes, reasons — no
         content bodies, so no secrets."""
+        tokens_by_category = {
+            c: sum(i.token_estimate or 0 for i in self.sections[c])
+            for c in CATEGORIES if self.sections[c]}
+        omitted_tokens = sum((p or {}).get("token_estimate") or 0
+                             for p, _r in self.omitted_items)
         return {
             "package_id": self.package_id, "role": self.role,
             "created_at": self.created_at,
@@ -140,6 +146,12 @@ class ContextPackage:
             "token_estimate": self.token_estimate,
             "reserved_output_tokens": self.reserved_output_tokens,
             "stable_prefix_chars": self.stable_prefix_chars,
+            "tokens_by_category": tokens_by_category,
+            "omitted_tokens": omitted_tokens,
+            "candidate_total_tokens": self.candidate_total_tokens,
+            "estimated_savings_tokens": max(
+                0, self.candidate_total_tokens - self.token_estimate),
+            "measurement": "estimated",   # local estimates, never provider-reported
             "included": [dict(p, reason=self.included_reasons.get(p["id"], ""))
                          for p in self.provenance()],
             "omitted": [{"item": p, "reason": r}

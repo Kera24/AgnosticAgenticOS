@@ -165,6 +165,17 @@ context:
     expansion_limit: 4
     excluded_paths: []          # extra globs, e.g. ["vendor/**"]
 
+# Prompt caching (Phase 8). The broker always renders a stable prefix
+# (policy, role contract, schema, project summary) before dynamic content
+# and marks the boundary. API adapters use it: Anthropic sends an explicit
+# cache_control breakpoint (providers.<name>.cache_enabled/cache_ttl:
+# "5m"|"1h"); OpenAI-compatible endpoints rely on automatic exact-prefix
+# caching (no fields exist to send). Subscription CLIs: no caching claim is
+# ever made — status stays "unknown" and cached tokens are recorded only
+# when a provider actually reports them.
+caching:
+  enabled: true
+
 # OS-owned persistent memory (ADR 0003): durable decisions, outcomes,
 # failures and findings — never transcripts, never credentials. Injection is
 # compact summaries only, bounded by inject_limit; details load on demand.
