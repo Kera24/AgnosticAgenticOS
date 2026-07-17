@@ -336,6 +336,7 @@ cycle:
   maximum_duration_minutes: 30
   maximum_repair_attempts: 3
   maximum_replans_per_task: 2
+  maximum_review_rounds: 2     # model-review repair rounds before escalation
 
 cooling:
   after_success_minutes: 30

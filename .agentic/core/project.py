@@ -394,31 +394,46 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                         % pattern, block=True,
                         blocking_reason="protected path in work order")
 
-    # coder + deterministic checks + repair loop -------------------------------------
+    # coder + deterministic checks + bounded repair/review loops ------------------
+    # Two separate bounds (Phase 7): deterministic repair attempts
+    # (repair.maximum_attempts_per_task, default 3) and model-review repair
+    # rounds (cycle.maximum_review_rounds, default 2). Failure fingerprints
+    # short-circuit hopeless identical retries; every escalation persists a
+    # blocker and a memory record.
     repair_cfg = cfg.get("repair") or {}
-    max_attempts = int(repair_cfg.get("maximum_attempts_per_task", 3))
+    max_det_attempts = int(repair_cfg.get("maximum_attempts_per_task", 3))
+    max_review_rounds = int((cfg.get("cycle") or {}).get(
+        "maximum_review_rounds", repair_cfg.get("maximum_review_rounds", 2)))
+    worker_role = _worker_role(task, order)
     gate_result = None
     qa_out = None
-    attempt = 0
+    det_attempts = 0
+    review_rounds = 0
+    coder_calls = 0
+    seen_fingerprints = set()
+    failed_backends = set()
     feedback = None
     used_backend = backend
     total_tokens = 0
-    while attempt < max_attempts:
-        attempt += 1
+    while True:
+        coder_calls += 1
         coder_input = {"work_order": order}
         if feedback:
-            coder_input.update(feedback)   # structured repair/handoff payload
+            coder_input.update(feedback)   # structured repair/handoff packet
         chain_now = coder_chain
         if feedback and feedback.get("handoff"):
             chain_now = feedback["handoff_chain"]
-        result = _invoke_coder(cfg, caller, coder_input, worktree, chain_now)
+        result = _invoke_coder(cfg, caller, coder_input, worktree, chain_now,
+                               role=worker_role)
         if not result["ok"]:
             kind = (result.get("error") or {}).get("kind", "?")
             retry = (result.get("capacity") or {}).get("retry_after_seconds")
-            if kind in ("rate_limit", "usage_limit") and attempt < max_attempts:
-                # backend down mid-task: structured handoff to next backend
+            if kind in ("rate_limit", "usage_limit"):
+                # backend down mid-task: structured handoff to the next
+                # backend, each backend tried at most once
+                failed_backends.add(result.get("backend"))
                 remaining = [b for b in coder_chain
-                             if b != result.get("backend")]
+                             if b not in failed_backends]
                 if remaining:
                     feedback = _handoff_payload(order, worktree, gate_result,
                                                 remaining)
@@ -439,21 +454,22 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         violations = _apply_and_check_paths(cfg, result, order, worktree,
                                             protected)
         if violations:
-            feedback = {"failing_checks": [],
-                        "scope_violations": violations,
-                        "instruction": "revert or move out-of-scope changes"}
+            det_attempts += 1
             log({"event": "scope_violation", "run_id": run_id,
                  "violations": violations[:5]})
-            if attempt >= max_attempts:
+            if det_attempts >= max_det_attempts:
                 _revert_worktree(worktree)
                 return fail("failure", "scope violations: %s"
                             % "; ".join(violations[:3]), block=True,
                             blocking_reason="repeated scope violations")
+            feedback = {"failing_checks": [],
+                        "scope_violations": violations,
+                        "instruction": "revert or move out-of-scope changes"}
             continue
 
         gate_result = gate.run_checks(cfg, worktree,
                                       os.path.join(run_dir,
-                                                   "checks-%d" % attempt))
+                                                   "checks-%d" % coder_calls))
         if gate_result["no_checks"]:
             _revert_worktree(worktree)
             projstate.add_blocker(a, task["id"],
@@ -466,17 +482,36 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         if not gate_result["ok"]:
             failing = [r for r in gate_result["results"]
                        if r["mandatory"] and not r["passed"]]
+            fingerprint = _failure_fingerprint(failing, worktree)
+            if fingerprint in seen_fingerprints:
+                _revert_worktree(worktree)
+                log({"event": "repeated_identical_failure",
+                     "run_id": run_id, "fingerprint": fingerprint})
+                return fail("failure",
+                            "repeated identical failure — stopping early",
+                            block=True,
+                            blocking_reason="repeated identical failure "
+                                            "(same diff, same errors)")
+            seen_fingerprints.add(fingerprint)
+            det_attempts += 1
+            log({"event": "gate_failed", "run_id": run_id,
+                 "attempt": det_attempts,
+                 "failing": [r["name"] for r in failing]})
+            if det_attempts >= max_det_attempts:
+                _revert_worktree(worktree)
+                return fail("failure",
+                            "deterministic checks failing after %d attempts"
+                            % det_attempts, block=True,
+                            blocking_reason="repair attempts exhausted")
             feedback = {"failing_checks":
                         [{"name": r["name"], "detail": r["detail"][:400]}
                          for r in failing],
                         "instruction": "make the failing checks pass; do not "
                                        "weaken or delete tests"}
-            log({"event": "gate_failed", "run_id": run_id, "attempt": attempt,
-                 "failing": [r["name"] for r in failing]})
             continue
 
         # QA review (independent, fresh context) --------------------------------
-        qa_input = _review_input(order, worktree, gate_result)
+        qa_input = _review_input(order, worktree, gate_result, task)
         qa = caller("qa", load_prompt("qa-review.md", shared=False), qa_input,
                     schema=_schema("verification.schema.json"),
                     workspace=worktree, permissions="read")
@@ -492,20 +527,26 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         if verdict == "pass" and (qa_out or {}).get(
                 "test_integrity_preserved", False):
             break
+        review_rounds += 1
+        if review_rounds > max_review_rounds:
+            # repeated disagreement escalates to the orchestrator: the task
+            # blocks with the reviewer's reason; a human decides
+            _revert_worktree(worktree)
+            log({"event": "review_escalation", "run_id": run_id,
+                 "rounds": review_rounds})
+            return fail("failure", "QA verdict %s after %d review rounds"
+                        % (verdict, review_rounds), block=True,
+                        blocking_reason="QA: %s"
+                        % str((qa_out or {}).get("reason", verdict))[:200])
+        # repair packet: the reviewer's structured findings only — never
+        # the reviewer's whole conversation
         feedback = {"failing_checks": [],
                     "qa_findings": (qa_out or {}).get("reason", "qa failed"),
+                    "required_repairs": (qa_out or {}).get(
+                        "required_repairs") or [],
+                    "review_findings": (qa_out or {}).get("findings") or [],
                     "instruction": "address the QA findings within scope"}
-        if attempt >= max_attempts:
-            _revert_worktree(worktree)
-            return fail("failure", "QA verdict %s after %d attempts"
-                        % (verdict, attempt), block=True,
-                        blocking_reason="QA: %s"
-                        % (qa_out or {}).get("reason", verdict)[:200])
-    else:
-        _revert_worktree(worktree)
-        return fail("failure", "deterministic checks failing after %d attempts"
-                    % max_attempts, block=True,
-                    blocking_reason="repair attempts exhausted")
+        continue
 
     # conditional security review ---------------------------------------------------
     changed = gitops.changed_files(worktree)
@@ -560,13 +601,41 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     return result
 
 
-def _invoke_coder(cfg, caller, coder_input, worktree, chain):
+UI_PATH_HINTS = ("ui/", "frontend/", "components/", "styles/", ".css",
+                 ".scss", ".tsx", ".jsx", ".vue", ".svelte")
+
+
+def _worker_role(task, order):
+    """UI-shaped tasks route to the ui_designer specialist (role-scoped
+    skills and routing); everything else is the coder."""
+    kind = str((task or {}).get("kind") or "").lower()
+    if kind in ("ui", "frontend", "ui_designer", "design"):
+        return "ui_designer"
+    paths = " ".join((task or {}).get("expected_paths", [])
+                     + (order or {}).get("allowed_paths", [])).lower()
+    if any(hint in paths for hint in UI_PATH_HINTS):
+        return "ui_designer"
+    return "coder"
+
+
+def _failure_fingerprint(failing, worktree):
+    """Stable fingerprint of (what failed, what the diff was). An identical
+    fingerprint means retrying is guaranteed to waste budget."""
+    import hashlib
+    basis = "\n".join(sorted("%s|%s" % (r["name"], r["detail"][:200])
+                             for r in failing))
+    basis += "\n===diff===\n" + gitops.diff_text(worktree)
+    return hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _invoke_coder(cfg, caller, coder_input, worktree, chain, role="coder"):
     """CLI backends edit the worktree directly; API/local backends return
     structured edits which we apply. Both paths produce a diffed worktree."""
     primary_type = (cfg.get("backends") or {}).get(chain[0], {}).get("type",
                                                                      "api")
     if primary_type == "cli":
-        result = caller("coder", load_prompt("coder-cli.md", shared=False), coder_input,
+        result = caller(role, load_prompt("coder-cli.md", shared=False),
+                        coder_input,
                         schema=None, workspace=worktree, permissions="write",
                         chain=chain)
         if result["ok"]:
@@ -576,7 +645,8 @@ def _invoke_coder(cfg, caller, coder_input, worktree, chain):
                 result["blocker"] = content.strip()[8:250].strip()
             result["edits"] = None   # CLI edited files itself
         return result
-    result = caller("coder", load_prompt("implement.md", shared=False), coder_input,
+    result = caller(role, load_prompt("implement.md", shared=False),
+                    coder_input,
                     schema=_schema("worker.schema.json"), workspace=worktree,
                     permissions="write", chain=chain)
     if result["ok"]:
@@ -612,8 +682,12 @@ def _revert_worktree(worktree):
     gitops.run_git(["clean", "-fd"], cwd=worktree, check=False)
 
 
-def _review_input(order, worktree, gate_result):
+def _review_input(order, worktree, gate_result, task=None):
+    """The reviewer's fresh context: order, acceptance criteria, diff, and
+    deterministic evidence — never the worker's conversation."""
     return {"work_order": order,
+            "acceptance_criteria": (task or {}).get("acceptance_criteria",
+                                                    []),
             "changed_files": gitops.changed_files(worktree),
             "diff": redact(gitops.diff_text(worktree)),
             "deterministic_checks": {
@@ -721,6 +795,16 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
         os.path.exists(os.path.join(worktree, ".env.example")))
     review = None
     if all(checks.values()) and caller is not None:
+        # the final auditor gets its own routing chain when the capability
+        # router configures one; the review contract itself is the QA one
+        try:
+            auditor_chain = backends.routing_chain(
+                cfg, "final_auditor", overrides,
+                memory_dir=p["memory"], board=board, ledger=ledger) \
+                if (cfg.get("routing") or {}).get("mode") == "capability" \
+                else None
+        except errors.AgenticError:
+            auditor_chain = None
         final = caller("qa", load_prompt("qa-review.md", shared=False),
                        {"work_order": {"item": "final project audit",
                                        "done_when": [
@@ -740,7 +824,8 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
                         "diff": "final audit: see repository state",
                         "changed_files": []},
                        schema=_schema("verification.schema.json"),
-                       workspace=worktree, permissions="read")
+                       workspace=worktree, permissions="read",
+                       chain=auditor_chain)
         review = final["structured_output"] if final["ok"] else None
         checks["final_independent_review"] = bool(
             review and review.get("verdict") == "pass")

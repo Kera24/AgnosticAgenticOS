@@ -1,29 +1,133 @@
 {
   "$id": "agentic/work-order",
   "type": "object",
-  "required": ["action", "item", "skill", "spec", "done_when", "allowed_paths",
-               "forbidden_paths", "maximum_changed_lines", "risk", "queue_reason"],
+  "required": [
+    "action",
+    "item",
+    "skill",
+    "spec",
+    "done_when",
+    "allowed_paths",
+    "forbidden_paths",
+    "maximum_changed_lines",
+    "risk",
+    "queue_reason"
+  ],
   "properties": {
-    "action": {"type": "string", "enum": ["execute", "queue", "stop"]},
-    "item": {"type": "string"},
-    "skill": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
-    "spec": {"type": "string"},
+    "action": {
+      "type": "string",
+      "enum": [
+        "execute",
+        "queue",
+        "stop"
+      ]
+    },
+    "item": {
+      "type": "string"
+    },
+    "skill": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "spec": {
+      "type": "string"
+    },
     "done_when": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "condition"],
+        "required": [
+          "id",
+          "condition"
+        ],
         "properties": {
-          "id": {"type": "string"},
-          "condition": {"type": "string", "minLength": 1},
-          "command": {"type": ["string", "null"]}
+          "id": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
-    "allowed_paths": {"type": "array", "items": {"type": "string"}},
-    "forbidden_paths": {"type": "array", "items": {"type": "string"}},
-    "maximum_changed_lines": {"type": "integer", "minimum": 0},
-    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-    "queue_reason": {"type": ["string", "null"]}
+    "allowed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "forbidden_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "maximum_changed_lines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "risk": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "queue_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "objective": {
+      "type": "string"
+    },
+    "excluded_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "expected_outputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "permitted_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "deterministic_checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "security_sensitive": {
+      "type": "boolean"
+    },
+    "context_package_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
   }
 }

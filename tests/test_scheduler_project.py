@@ -240,7 +240,14 @@ def test_repair_attempts_exhausted_blocks_task(sandbox):
                        [{"name": "always-fails", "passed": True}])
     task = simple_task()
     seed_project(sandbox, [task])
-    caller = std_caller(task)
+    # each repair attempt produces a DIFFERENT diff (otherwise the identical
+    # failure fingerprint short-circuits the loop — tested separately)
+    caller = std_caller(task, coder=[
+        edit_ok(),
+        edit_ok(edits=[{"path": "src/app.py", "action": "write",
+                        "content": "VALUE = 3\n"}]),
+        edit_ok(edits=[{"path": "src/app.py", "action": "write",
+                        "content": "VALUE = 4\n"}])])
     result = cycle(sandbox, caller, Clock())
     assert result["status"] == "failure"
     assert len([c for c in caller.calls if c["role"] == "coder"]) == 3

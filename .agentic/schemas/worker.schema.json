@@ -1,23 +1,111 @@
 {
   "$id": "agentic/worker",
   "type": "object",
-  "required": ["summary", "blocked", "edits"],
+  "required": [
+    "summary",
+    "blocked",
+    "edits"
+  ],
   "properties": {
-    "summary": {"type": "string"},
-    "blocked": {"type": "boolean"},
-    "blocker": {"type": ["string", "null"]},
+    "summary": {
+      "type": "string"
+    },
+    "blocked": {
+      "type": "boolean"
+    },
+    "blocker": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "edits": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["path", "action"],
+        "required": [
+          "path",
+          "action"
+        ],
         "properties": {
-          "path": {"type": "string", "minLength": 1},
-          "action": {"type": "string", "enum": ["write", "delete"]},
-          "content": {"type": ["string", "null"]}
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "write",
+              "delete"
+            ]
+          },
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
-    "commands": {"type": "array", "items": {"type": "string"}}
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tests_run": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "test_results": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "unresolved_items": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "suggested_memory_records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "compact_summary": {
+            "type": "string"
+          }
+        }
+      }
+    }
   }
 }
