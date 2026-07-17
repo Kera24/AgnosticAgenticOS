@@ -53,10 +53,26 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
     memory_dir = memory_dir or os.path.join(str(config_mod.AGENTIC_DIR),
                                             "memory")
 
+    def _chain_for(role):
+        worker_chain = None
+        from .routing import REVIEWER_ROLES
+        if role in REVIEWER_ROLES and \
+                (cfg.get("routing") or {}).get("mode") == "capability":
+            worker_chain = backends.routing_chain(
+                cfg, "coder", overrides, memory_dir=None, board=board,
+                ledger=ledger)
+        return backends.routing_chain(cfg, role, overrides,
+                                      memory_dir=memory_dir, board=board,
+                                      ledger=ledger,
+                                      worker_chain=worker_chain)
+
     def call(role, prompt, input_data=None, schema=None, workspace=None,
              permissions="read", timeout=None, chain=None):
-        chain = chain or backends.routing_chain(cfg, role, overrides)
-        try:
+        chain = chain or _chain_for(role)
+
+        def build_prompt(backend_name):
+            """Rebuild the full package for a specific backend so fallback
+            models get context sized to their own window/budget."""
             retrieved = retrieval_items(cfg, role, input_data, workspace,
                                         memory_dir, runner=runner,
                                         which=which)
@@ -69,8 +85,12 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
             retrieved += skill_items(cfg, str(config_mod.AGENTIC_DIR),
                                      role, retrieval_query(input_data))
             package = compose(cfg, role, prompt, input_data, schema,
-                              memory_dir=memory_dir, backend=chain[0],
+                              memory_dir=memory_dir, backend=backend_name,
                               extra_items=retrieved)
+            return package.rendered
+
+        try:
+            rendered = build_prompt(chain[0])
         except BrokerError as exc:
             err = errors.PolicyError("context broker: %s" % exc)
             (log or (lambda e: None))({"event": "context_budget_stop",
@@ -78,11 +98,12 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
                                        "detail": str(exc)[:300]})
             return backends.error_result(chain[0], role, err)
         return backends.invoke_backend(
-            cfg, chain[0], role, package.rendered, input_data=None,
+            cfg, chain[0], role, rendered, input_data=None,
             output_schema=schema, workspace=workspace,
             permissions=permissions, timeout=timeout, ledger=ledger,
             board=board, fallback_chain=chain[1:], runner=runner,
-            transport=transport, which=which, env=env, log=log)
+            transport=transport, which=which, env=env, log=log,
+            prompt_builder=build_prompt)
     return call
 
 
@@ -305,7 +326,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                 "detail": "no eligible task (dependencies blocked)"}
 
     # capacity gate ------------------------------------------------------------
-    chain = backends.routing_chain(cfg, "coder", overrides)
+    chain = backends.routing_chain(cfg, "coder", overrides, board=board,
+                                   ledger=ledger)
     decision = capacity_mod.decide_start(cfg, task, ledger, board, chain)
     log({"event": "capacity_decision", **decision})
     if decision["decision"] == "wait":

@@ -23,6 +23,7 @@
 
 # context-package ledger (ids/counts/reasons only, but machine-local)
 .agentic/memory/context-ledger.jsonl
+.agentic/memory/routing-decisions.jsonl
 
 # persistent memory database (project decisions/outcomes; machine-local)
 .agentic/memory/memory.db

@@ -204,6 +204,14 @@ def cmd_capacity(cfg, args):
 
 def cmd_backends(cfg, args):
     from core.breaker import BreakerBoard
+    if args.plan == "discover":
+        from core.routing import discover
+        _print(discover(cfg, MEMORY))
+        return 0
+    if args.plan == "decisions":
+        from core.routing import read_decisions
+        _print(read_decisions(MEMORY))
+        return 0
     print(BreakerBoard(MEMORY).render())
     return 0
 

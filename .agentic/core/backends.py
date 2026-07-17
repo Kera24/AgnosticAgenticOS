@@ -133,13 +133,24 @@ def error_result(backend, role, err, backend_type="?"):
             "error": err.as_dict()}
 
 
-def routing_chain(cfg, role, overrides=None):
-    """Ordered backend chain for a role: CLI overrides > per-agent routing >
-    simple routing."""
+def routing_chain(cfg, role, overrides=None, memory_dir=None, board=None,
+                  ledger=None, worker_chain=None):
+    """Ordered backend chain for a role: CLI overrides > capability routing
+    (when routing.mode: capability) > per-agent routing > simple routing."""
     overrides = overrides or {}
     if overrides.get("primary"):
         return [overrides["primary"]] + list(overrides.get("fallbacks") or [])
     routing = cfg.get("routing") or {}
+    if routing.get("mode") == "capability":
+        from .routing import capability_chain
+        chain = capability_chain(cfg, role, memory_dir=memory_dir,
+                                 board=board, ledger=ledger,
+                                 worker_chain=worker_chain)
+        if not chain:
+            raise errors.PolicyError(
+                "capability routing found no usable backend for role %r"
+                % role)
+        return chain
     if routing.get("mode") == "per_agent":
         per = (routing.get("per_agent") or {}).get(role)
         if per and per.get("primary"):
@@ -166,10 +177,15 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                    output_schema=None, workspace=None, permissions="read",
                    timeout=None, run_context=None, *, ledger, board,
                    fallback_chain=None, runner=None, transport=None,
-                   which=None, env=None, log=None):
+                   which=None, env=None, log=None, prompt_builder=None):
     """Invoke a role on a backend chain. Returns the normalized result
     (`ok: false` + typed error rather than raising, except for programming
-    errors)."""
+    errors).
+
+    prompt_builder: optional callable(backend_name) -> prompt. When given,
+    the prompt is REBUILT for each backend in the chain so a fallback model
+    with a smaller context window receives a package built for its own
+    budget — never the primary's oversized prompt."""
     log = log or (lambda event: None)
     timeout = timeout or int((cfg.get("execution") or {})
                              .get("command_timeout_seconds", 900))
@@ -218,6 +234,17 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                  "detail": str(exc)[:200]})
             continue
 
+        if prompt_builder is not None and position > 0:
+            try:
+                prompt = prompt_builder(name)
+            except Exception as exc:   # broker refused: budget too small
+                last_err = errors.ContextLengthError(
+                    "context rebuild for %s failed: %s" % (name,
+                                                           str(exc)[:150]),
+                    provider=name)
+                log({"event": "context_rebuild_failed", "backend": name,
+                     "detail": str(exc)[:200]})
+                continue
         started = time.time()
         try:
             result = adapter.invoke(agent_role, prompt, input_data,

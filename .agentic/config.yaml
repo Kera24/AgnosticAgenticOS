@@ -291,10 +291,38 @@ backends:
   # openrouter_api: {type: api, provider: openrouter, model: vendor/model}
 
 routing:
-  mode: simple               # simple | per_agent
+  mode: simple               # simple | per_agent | capability
   primary: null              # set by `run setup` or --primary
   fallbacks: []
   per_agent: {}              # architect/conductor/coder/qa/security overrides
+
+  # Policies apply to capability mode (and are honest defaults elsewhere).
+  policies:
+    reviewer_different_from_worker: false
+    no_fallback_on_auth_failure: true    # enforced in code regardless
+    no_fallback_on_refusal: true         # enforced in code regardless
+    allow_local_fallback: true
+
+  # Capability mode: roles declare required capabilities and (optionally)
+  # ordered preferences. Backends may declare capabilities/context_window
+  # in the backends: section. Model names below are EXAMPLES — used only
+  # if that backend is actually installed and authenticated.
+  # agents:
+  #   architect:
+  #     capabilities: {reasoning: highest, long_running: true}
+  #     preferred:
+  #       - {backend: claude, model: auto}
+  #       - {backend: codex, model: auto}
+  #   coder:
+  #     capabilities: {coding: high}
+  #     preferred:
+  #       - {backend: codex, model: auto}
+  #       - {backend: claude, model: auto}
+  #       - {backend: ollama, model: auto}
+  #   qa:
+  #     independent_from: coder
+  #     capabilities: {reasoning: high, review: high}
+  agents: {}
 
 interaction:
   mode: completion_only      # cycle_review | milestone_review | completion_only
