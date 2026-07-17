@@ -65,6 +65,9 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
             from .knowledge import knowledge_items
             retrieved += knowledge_items(cfg, str(config_mod.AGENTIC_DIR),
                                          retrieval_query(input_data))
+            from .skillreg import skill_items
+            retrieved += skill_items(cfg, str(config_mod.AGENTIC_DIR),
+                                     role, retrieval_query(input_data))
             package = compose(cfg, role, prompt, input_data, schema,
                               memory_dir=memory_dir, backend=chain[0],
                               extra_items=retrieved)

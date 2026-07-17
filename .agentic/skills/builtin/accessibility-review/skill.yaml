@@ -1,0 +1,8 @@
+id: accessibility-review
+name: Accessibility Review
+description: WCAG-conscious review checklist for interfaces — keyboard,
+  contrast, semantics, assistive technology.
+license: repository
+compatible_agents: [qa, ui_designer, coder]
+triggers: [accessibility, a11y, wcag, aria, keyboard, screen reader,
+           contrast]

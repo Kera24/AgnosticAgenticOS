@@ -35,6 +35,11 @@ Memory (progressive disclosure):
 Knowledge vault (Obsidian-compatible):
   python .agentic/run knowledge status|rebuild|validate|open
 
+Skills (pinned, reviewed, never auto-installed):
+  python .agentic/run skills list|inspect|verify|enable|disable|remove
+  python .agentic/run skills add <source-dir> --revision <commit>
+  python .agentic/run skills recommend <task-id>
+
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
 """
@@ -325,6 +330,64 @@ def cmd_memory(cfg, args):
     return 2
 
 
+def cmd_skills(cfg, args):
+    """skills list | inspect <id> | add <src> --revision <commit> |
+    enable/disable/verify/remove <id> | review <id> | recommend <task-id>"""
+    from core.skillreg import SkillError, SkillRegistry
+    registry = SkillRegistry(cfg, str(AGENTIC_DIR))
+    sub = args.plan or "list"
+    extra = args.extra or []
+    try:
+        if sub == "list":
+            _print([{k: s.get(k) for k in ("id", "name", "enabled",
+                                           "reviewed", "risk_level",
+                                           "pinned_revision", "source")}
+                    for s in registry.list()])
+            return 0
+        if sub == "inspect":
+            skill = registry.get(extra[0]) if extra else None
+            if not skill:
+                print("usage: skills inspect <id>", file=sys.stderr)
+                return 2
+            _print(skill)
+            return 0
+        if sub == "add":
+            if not extra:
+                print("usage: skills add <source-dir> --revision <commit>",
+                      file=sys.stderr)
+                return 2
+            _print(registry.add(extra[0], revision=args.revision))
+            print("installed DISABLED and UNREVIEWED; inspect, then "
+                  "'skills review <id>' and 'skills enable <id>'")
+            return 0
+        if sub in ("enable", "disable", "verify", "remove", "review"):
+            if not extra:
+                print("usage: skills %s <id>" % sub, file=sys.stderr)
+                return 2
+            action = {"enable": registry.enable,
+                      "disable": registry.disable,
+                      "verify": registry.verify,
+                      "remove": registry.remove,
+                      "review": registry.mark_reviewed}[sub]
+            _print(action(extra[0]))
+            return 0
+        if sub == "recommend":
+            from core import projstate
+            task = None
+            if extra and projstate.exists(str(AGENTIC_DIR)):
+                task = next((t for t in projstate.load_backlog(
+                    str(AGENTIC_DIR)) if t["id"] == extra[0]), None)
+            query = (task or {}).get("description") or " ".join(extra)
+            _print([{k: s[k] for k in ("id", "name", "description")}
+                    for s in registry.select("coder", query, limit=5)])
+            return 0
+    except SkillError as exc:
+        print("skills error: %s" % exc, file=sys.stderr)
+        return 1
+    print("unknown skills subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_knowledge(cfg, args):
     """knowledge status | rebuild | validate | open"""
     from core.knowledge import KnowledgeVault
@@ -369,7 +432,7 @@ COMMANDS = {
     "project-review": cmd_project_review, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
     "context": cmd_context, "memory": cmd_memory,
-    "knowledge": cmd_knowledge,
+    "knowledge": cmd_knowledge, "skills": cmd_skills,
 }
 
 
@@ -384,6 +447,7 @@ def main(argv):
     parser.add_argument("--profile")
     parser.add_argument("--max-cycles", type=int, default=1)
     parser.add_argument("--no-smoke", action="store_true")
+    parser.add_argument("--revision")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--dev", action="store_true")

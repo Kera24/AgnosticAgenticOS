@@ -1,0 +1,8 @@
+id: uiux-design-systems
+name: UI/UX Design Systems
+description: Working with design tokens, component libraries and consistent
+  interaction patterns across an application.
+license: repository
+compatible_agents: [coder, ui_designer, qa]
+triggers: [design system, tokens, theme, component library, dark mode,
+           style guide, variants]

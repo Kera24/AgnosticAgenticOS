@@ -42,6 +42,10 @@ memory-export.json
 # volatile Obsidian workspace state (user's editor state, not knowledge)
 .agentic/knowledge/.obsidian/
 
+# machine-local skill installations and registry (builtin/ ships in git)
+.agentic/skills/registry.yaml
+.agentic/skills/installed/
+
 # distribution archives
 agentic-os-dist.zip
 

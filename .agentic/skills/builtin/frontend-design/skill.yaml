@@ -1,0 +1,8 @@
+id: frontend-design
+name: Frontend Design
+description: Visual design guidance for building distinctive, professional
+  frontend interfaces without generic-template aesthetics.
+license: repository
+compatible_agents: [coder, ui_designer]
+triggers: [frontend, ui, page, component, css, layout, design, dashboard,
+           landing, interface]

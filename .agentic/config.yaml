@@ -180,6 +180,17 @@ knowledge:
   enabled: true
   path: null
 
+# Skills registry (ADR 0006). Installation is ALWAYS an explicit admin
+# action with a pinned revision; skills are checksummed, reviewed, loaded
+# on demand only, and rank below OS policy. Scripts never run unless
+# allow_scripts is true AND the skill is reviewed AND the command passes
+# the execution allowlist.
+skills:
+  enabled: true
+  auto_install: false
+  allow_scripts: false
+  max_injected: 2
+
 budget:
   daily_limit_usd: 5
   per_run_limit_usd: 2

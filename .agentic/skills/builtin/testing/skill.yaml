@@ -1,0 +1,7 @@
+id: testing
+name: Testing
+description: Writing focused, deterministic, honest tests — unit through
+  end-to-end — without weakening existing coverage.
+license: repository
+compatible_agents: [coder, qa]
+triggers: [test, tests, pytest, vitest, coverage, tdd, regression, mock]
