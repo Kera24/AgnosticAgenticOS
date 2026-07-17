@@ -11,6 +11,11 @@ import { Capacity } from "./pages/Capacity";
 import { Verification } from "./pages/Verification";
 import { Activity } from "./pages/Activity";
 import { Settings } from "./pages/Settings";
+import { Context } from "./pages/Context";
+import { Memory } from "./pages/Memory";
+import { Knowledge } from "./pages/Knowledge";
+import { Skills } from "./pages/Skills";
+import { Routing } from "./pages/Routing";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -34,6 +39,11 @@ export function App() {
               <Route path="build" element={<Build />} />
               <Route path="agents" element={<Agents />} />
               <Route path="backends" element={<Backends />} />
+              <Route path="routing" element={<Routing />} />
+              <Route path="context" element={<Context />} />
+              <Route path="memory" element={<Memory />} />
+              <Route path="knowledge" element={<Knowledge />} />
+              <Route path="skills" element={<Skills />} />
               <Route path="capacity" element={<Capacity />} />
               <Route path="verification" element={<Verification />} />
               <Route path="activity" element={<Activity />} />

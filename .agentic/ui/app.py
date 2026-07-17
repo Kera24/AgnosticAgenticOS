@@ -363,6 +363,89 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         except snapshots.LogAccessError as exc:
             raise HTTPException(404, str(exc))
 
+    # -- context / memory / knowledge / skills / routing (Phase 10) -----------
+    from ui import intel
+
+    @app.get(API + "/context")
+    def context_view():
+        return intel.context_snapshot(cfg())
+
+    @app.get(API + "/context/search")
+    def context_search(q: str = ""):
+        q = q.strip()
+        if not q:
+            raise HTTPException(422, "query required")
+        return intel.context_search(cfg(), q[:500])
+
+    @app.get(API + "/memory")
+    def memory_view(q: str = "", include_superseded: bool = False):
+        snapshot = intel.memory_snapshot(cfg())
+        snapshot.update(intel.memory_search(
+            cfg(), q.strip()[:500], include_superseded=include_superseded))
+        return snapshot
+
+    @app.get(API + "/memory/{record_id}/timeline")
+    def memory_timeline(record_id: str):
+        return intel.memory_timeline(cfg(), record_id[:64])
+
+    @app.get(API + "/memory/records")
+    def memory_records(ids: str = ""):
+        wanted = [i.strip()[:64] for i in ids.split(",") if i.strip()][:20]
+        return intel.memory_details(cfg(), wanted)
+
+    class ForgetBody(BaseModel):
+        id: str = Field(max_length=64)
+        confirm: bool = False
+
+    @app.post(API + "/memory/forget")
+    def memory_forget(body: ForgetBody):
+        if not body.confirm:
+            raise HTTPException(422, "confirmation required to forget a "
+                                     "memory record")
+        result = intel.memory_forget(cfg(), body.id)
+        audit("ui_memory_forget", record=body.id,
+              forgotten=result["forgotten"])
+        if not result["forgotten"]:
+            raise HTTPException(404, "unknown memory record")
+        return result
+
+    @app.get(API + "/knowledge")
+    def knowledge_view():
+        return intel.knowledge_snapshot(cfg())
+
+    @app.get(API + "/knowledge/doc")
+    def knowledge_doc(path: str):
+        try:
+            doc = intel.knowledge_document(cfg(), path[:500])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if doc is None:
+            raise HTTPException(404, "document not found")
+        return doc
+
+    @app.get(API + "/skills")
+    def skills_view():
+        return intel.skills_snapshot(cfg())
+
+    @app.post(API + "/skills/{skill_id}/{action}")
+    def skills_action(skill_id: str, action: str, body: ConfirmBody):
+        if action not in ("enable", "disable", "verify"):
+            raise HTTPException(404, "unknown action")
+        if action in ("enable", "disable") and not body.confirm:
+            raise HTTPException(422, "confirmation required")
+        from core.skillreg import SkillError
+        try:
+            result = intel.skill_action(cfg(), skill_id[:64], action)
+        except SkillError as exc:
+            raise HTTPException(422, str(exc))
+        audit("ui_skill_action", skill=skill_id[:64], action=action)
+        bus.publish("state", {"changed": "skills"})
+        return result
+
+    @app.get(API + "/routing")
+    def routing_view():
+        return intel.routing_snapshot(cfg())
+
     # -- settings --------------------------------------------------------------------
     @app.get(API + "/settings")
     def get_settings():
