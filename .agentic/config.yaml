@@ -153,6 +153,18 @@ context:
   #   coder: {default_input_budget_tokens: 96000}
   roles: {}
 
+  # Code intelligence (ADR 0002). provider: none | native | cce.
+  # `cce` requires an installed Code Context Engine CLI; it degrades to
+  # `fallback` (then `none`) with the reason reported by doctor/status.
+  code_intelligence:
+    provider: native
+    fallback: none
+    index_on_project_start: true
+    incremental_after_commit: true
+    search_limit: 12
+    expansion_limit: 4
+    excluded_paths: []          # extra globs, e.g. ["vendor/**"]
+
 budget:
   daily_limit_usd: 5
   per_run_limit_usd: 2

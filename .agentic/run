@@ -19,6 +19,12 @@ Full-project build:
   python .agentic/run ui                local Control Centre dashboard
                                         (--port N --no-open; loopback only)
 
+Context intelligence:
+  python .agentic/run context status
+  python .agentic/run context search "<query>"
+  python .agentic/run context reindex
+  python .agentic/run context explain <package-id>
+
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
 """
@@ -221,6 +227,45 @@ def cmd_package(cfg, args):
     return 0
 
 
+def cmd_context(cfg, args):
+    """context status | search "<query>" | reindex | explain <package-id>"""
+    from core.codeintel import get_adapter
+    from core.config import repo_root
+    from core.context.ledger import read_packages
+    sub = args.plan or "status"
+    extra = args.extra or []
+    root = str(repo_root(cfg))
+    adapter = get_adapter(cfg, root, MEMORY)
+    if sub == "status":
+        status = adapter.status()
+        status["health"] = adapter.health_check()
+        status["fallback_reason"] = getattr(adapter, "fallback_reason", None)
+        status["recent_packages"] = len(read_packages(MEMORY, limit=1000))
+        _print(status)
+        return 0
+    if sub == "search":
+        if not extra:
+            print("usage: context search \"<query>\"", file=sys.stderr)
+            return 2
+        _print(adapter.search(" ".join(extra)))
+        return 0
+    if sub == "reindex":
+        _print(adapter.index_full())
+        return 0
+    if sub == "explain":
+        if not extra:
+            print("usage: context explain <package-id>", file=sys.stderr)
+            return 2
+        records = read_packages(MEMORY, package_id=extra[0])
+        if not records:
+            print("no package %r in the ledger" % extra[0], file=sys.stderr)
+            return 1
+        _print(records[-1])
+        return 0
+    print("unknown context subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_ui(cfg, args):
     from ui.serve import run_ui
     return run_ui(cfg, port=args.port,
@@ -236,6 +281,7 @@ COMMANDS = {
     "project-status": cmd_project_status, "project-pause": cmd_project_pause,
     "project-review": cmd_project_review, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
+    "context": cmd_context,
 }
 
 
@@ -243,6 +289,7 @@ def main(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("command", nargs="?")
     parser.add_argument("plan", nargs="?")
+    parser.add_argument("extra", nargs="*")
     parser.add_argument("--primary")
     parser.add_argument("--fallback", action="append", default=[])
     parser.add_argument("--set", dest="sets", action="append", default=[])

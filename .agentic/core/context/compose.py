@@ -95,6 +95,61 @@ def input_items(input_data):
     return items
 
 
+RETRIEVAL_ROLES = ("conductor", "coder", "worker", "qa", "security",
+                   "verifier", "ui_designer")
+
+
+def retrieval_query(input_data):
+    """Deterministic retrieval query from the call-site input."""
+    if not isinstance(input_data, dict):
+        return None
+    order = input_data.get("work_order") or {}
+    task = input_data.get("task") or {}
+    parts = [order.get("item"), order.get("spec"), order.get("objective"),
+             task.get("description")]
+    query = " ".join(str(p) for p in parts if p)
+    return query.strip() or None
+
+
+def retrieval_items(cfg, role, input_data, workspace, memory_dir,
+                    runner=None, which=None):
+    """Retrieved-code ContextItems for a role, token-bounded by the code
+    allocation. Best-effort: any adapter failure returns no items."""
+    from ..codeintel import ci_config, get_adapter
+    from .broker import context_config
+    if role not in RETRIEVAL_ROLES or not workspace:
+        return []
+    query = retrieval_query(input_data)
+    if not query:
+        return []
+    try:
+        cicfg = ci_config(cfg)
+        adapter = get_adapter(cfg, workspace, memory_dir, runner=runner,
+                              which=which)
+        ccfg = context_config(cfg, role)
+        budget = int(ccfg["default_input_budget_tokens"]
+                     * float(ccfg["allocation"].get("code_percent", 35))
+                     / 100.0)
+        results = adapter.search(query, limit=int(cicfg["search_limit"]),
+                                 token_budget=budget)
+    except Exception:   # retrieval is never allowed to break an invocation
+        return []
+    items = []
+    for result in results:
+        items.append(ContextItem(
+            "code",
+            "```%s:%s-%s\n%s\n```" % (result["path"], result["start_line"],
+                                      result["end_line"], result["snippet"]),
+            source_type="code_intelligence",
+            source_path=result["path"],
+            relevance_score=min(0.9, 0.5 + float(result.get("score") or 0)
+                                / 10.0),
+            trust_level="untrusted",
+            metadata={"range": (result["start_line"], result["end_line"]),
+                      "provider": result.get("provider")}))
+    return items
+
+
 def compose(cfg, role, role_prompt, input_data=None, schema=None, *,
             memory_dir, backend=None, model=None, task_id=None,
             cycle_id=None, extra_items=None, max_input_tokens=None,

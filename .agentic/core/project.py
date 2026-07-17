@@ -48,7 +48,7 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
     """Build the single call surface used by every agent role. Every prompt
     is assembled by the Context Broker (ADR 0001) — never ad hoc."""
     from .context.broker import BrokerError
-    from .context.compose import compose
+    from .context.compose import compose, retrieval_items
     memory_dir = memory_dir or os.path.join(str(config_mod.AGENTIC_DIR),
                                             "memory")
 
@@ -56,8 +56,12 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
              permissions="read", timeout=None, chain=None):
         chain = chain or backends.routing_chain(cfg, role, overrides)
         try:
+            retrieved = retrieval_items(cfg, role, input_data, workspace,
+                                        memory_dir, runner=runner,
+                                        which=which)
             package = compose(cfg, role, prompt, input_data, schema,
-                              memory_dir=memory_dir, backend=chain[0])
+                              memory_dir=memory_dir, backend=chain[0],
+                              extra_items=retrieved)
         except BrokerError as exc:
             err = errors.PolicyError("context broker: %s" % exc)
             (log or (lambda e: None))({"event": "context_budget_stop",
@@ -126,6 +130,7 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
     projstate.write_yaml(a, "blockers.yaml", {"blockers": []})
     projstate.refresh_progress(a)
     scheduler.set_project_status("in_progress")
+    _index_project(cfg, p["root"], p["memory"], log, full=True)
     log({"event": "project_started", "tasks": len(tasks),
          "milestones": len(out["milestones"])})
     for decision in out.get("human_decisions", []):
@@ -133,6 +138,29 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
     return {"status": "started", "tasks": len(tasks),
             "milestones": len(out["milestones"]),
             "human_decisions": out.get("human_decisions", [])}
+
+
+def _index_project(cfg, root, memory_dir, log, full, changed=None):
+    """Best-effort code-intelligence indexing; never fails the cycle."""
+    from .codeintel import ci_config, get_adapter
+    cicfg = ci_config(cfg)
+    want = cicfg["index_on_project_start"] if full \
+        else cicfg["incremental_after_commit"]
+    if not want:
+        return
+    try:
+        adapter = get_adapter(cfg, root, memory_dir)
+        if full:
+            result = adapter.index_full()
+        else:
+            revision = gitops.run_git(["rev-parse", "HEAD"], cwd=root,
+                                      check=False).strip() or None
+            result = adapter.index_changes(changed or [], revision)
+        log({"event": "code_index", "full": full,
+             "provider": result.get("provider"),
+             "files_indexed": result.get("files_indexed")})
+    except Exception as exc:   # noqa: BLE001 — indexing is best-effort
+        log({"event": "code_index_failed", "detail": str(exc)[:200]})
 
 
 # -- worktree ---------------------------------------------------------------------
@@ -447,6 +475,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     blocking_reason="possible secret in diff")
     gitops.commit_all(worktree, "agentic cycle %s: %s (%s)"
                       % (run_id, task["id"], order["item"][:60]))
+    _index_project(cfg, worktree, p["memory"], log, full=False,
+                   changed=changed)
     projstate.update_task(a, task["id"], status="done",
                           attempts=task["attempts"] + 1, last_result="pass",
                           blocking_reason=None)

@@ -110,6 +110,21 @@ def run_doctor(cfg=None, env=None):
             "unknown_price_policy=block cannot run (CLI/local backends are "
             "unaffected)")
 
+    try:
+        from .codeintel import ci_config, get_adapter
+        cicfg = ci_config(cfg)
+        adapter = get_adapter(cfg, str(root),
+                              str(AGENTIC_DIR / "memory"))
+        health = adapter.health_check()
+        detail = "code intelligence: configured=%s active=%s" \
+            % (cicfg["provider"], adapter.provider_name)
+        reason = getattr(adapter, "fallback_reason", None)
+        if reason:
+            detail += " (%s)" % reason
+        add("ok" if health.get("ok") else "warn", detail)
+    except Exception as exc:
+        add("warn", "code intelligence unavailable: %s" % exc)
+
     _backend_checks(cfg, add, env)
     return _finish(checks)
 
