@@ -394,6 +394,12 @@ scheduler:
     after_failure_minutes: 30
     minimum_minutes: 5
     maximum_minutes: 360
+    dynamic: true              # consecutive failures escalate cooling
+  capacity:
+    safety_multiplier: 1.35
+    stop_before_exhaustion: true    # refuse when the envelope won't fit
+    include_review_reserve: true    # QA/security/repair tokens reserved
+    confidence_required: false      # true: never start on unknown capacity
   continuation:
     automatic: true
     resume_after_restart: true

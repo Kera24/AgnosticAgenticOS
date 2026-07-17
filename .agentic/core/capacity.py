@@ -146,8 +146,18 @@ class CapacityLedger:
 
 # -- next-cycle estimation ---------------------------------------------------------
 
+def capacity_config(cfg):
+    """Effective capacity policy: `capacity:` merged with the newer
+    `scheduler.capacity:` overrides."""
+    merged = {"safety_multiplier": 1.35, "stop_before_exhaustion": True,
+              "include_review_reserve": True, "confidence_required": False}
+    merged.update(cfg.get("capacity") or {})
+    merged.update((cfg.get("scheduler") or {}).get("capacity") or {})
+    return merged
+
+
 def _safety_multiplier(cfg):
-    raw = (cfg.get("capacity") or {}).get("safety_multiplier", 1.35)
+    raw = capacity_config(cfg).get("safety_multiplier", 1.35)
     try:
         return min(3.0, max(1.0, float(raw)))
     except (TypeError, ValueError):
@@ -155,28 +165,36 @@ def _safety_multiplier(cfg):
 
 
 def estimate_cycle_tokens(cfg, task, ledger, backend):
-    """Conservative next-cycle token estimate per the documented formula."""
+    """Conservative next-cycle token estimate: context + expected output +
+    review + repair reserve + overhead, scaled by size and history. The
+    review/repair reserve is included unless explicitly disabled."""
+    ccfg = capacity_config(cfg)
     size = (task or {}).get("expected_size", "medium")
     factor = SIZE_FACTOR.get(size, 1.0)
     security = bool((task or {}).get("security_relevant"))
     per_role = dict(DEFAULT_ROLE_TOKENS)
-    per_role.update((cfg.get("capacity") or {}).get("role_tokens") or {})
+    per_role.update(ccfg.get("role_tokens") or {})
 
     # history for the same skill/backend refines the coder estimate
     history = ledger.recent_cycles(backend=backend,
                                    skill=(task or {}).get("skill"))
     hist_tokens = [int(float(r["total_tokens"])) for r in history
                    if r.get("total_tokens")]
+    review_reserve = 0
+    if ccfg.get("include_review_reserve", True):
+        review_reserve = int(
+            per_role["qa"] * factor
+            + (per_role["security"] * factor if security else 0)
+            + per_role["coder"] * factor * 0.5)     # repair reserve
     estimated = int(
         per_role["conductor"] * factor
         + per_role["coder"] * factor
-        + per_role["qa"] * factor
-        + (per_role["security"] * factor if security else 0)
-        + per_role["coder"] * factor * 0.5          # repair reserve
+        + review_reserve
         + ORCHESTRATION_OVERHEAD_TOKENS)
     highest_recent = max(hist_tokens) if hist_tokens else 0
     required = int(max(estimated, highest_recent) * _safety_multiplier(cfg))
     return {"estimated_cycle_tokens": estimated,
+            "review_reserve_tokens": review_reserve,
             "highest_recent_cycle_tokens": highest_recent,
             "required_capacity_tokens": required,
             "safety_multiplier": _safety_multiplier(cfg),
@@ -188,6 +206,8 @@ def decide_start(cfg, task, ledger, board, chain, reported_remaining=None):
 
     chain: ordered backend names, primary first. Returns the documented
     decision dict; never claims estimated capacity as a provider quota."""
+    ccfg = capacity_config(cfg)
+    stop_short = bool(ccfg.get("stop_before_exhaustion", True))
     candidates, wait_untils = [], []
     estimate = None
     for backend in chain:
@@ -204,23 +224,36 @@ def decide_start(cfg, task, ledger, board, chain, reported_remaining=None):
         verb = "start" if backend == chain[0] else "reroute"
         reported = (reported_remaining or {}).get(backend)
         if reported is not None:
-            if reported >= required:
+            if reported >= required or not stop_short:
                 return _decision(verb, "reported", backend, required,
                                  reported, estimate, chain,
-                                 "reported capacity sufficient")
+                                 "reported capacity sufficient"
+                                 if reported >= required else
+                                 "reported capacity SHORT of the estimated "
+                                 "envelope; proceeding because "
+                                 "stop_before_exhaustion is disabled")
             continue
         remaining = ledger.remaining_by_limits(backend)
         if remaining is not None:
-            if remaining >= required:
+            if remaining >= required or not stop_short:
                 return _decision(verb, "estimated", backend, required,
                                  remaining, estimate, chain,
                                  "estimated capacity under local limits "
-                                 "sufficient (estimate, not provider quota)")
+                                 "sufficient (estimate, not provider quota)"
+                                 if remaining >= required else
+                                 "estimated capacity short; proceeding "
+                                 "because stop_before_exhaustion is "
+                                 "disabled")
             continue
         # capacity unknown: rely on history and the safety reserve
         candidates.append((backend, required))
     if candidates:
         backend, required = candidates[0]
+        if ccfg.get("confidence_required"):
+            return _decision("human_required", "unknown", None, required,
+                             None, estimate, chain,
+                             "capacity confidence required but only "
+                             "unknown-capacity backends are usable")
         decision = "start" if backend == chain[0] else "reroute"
         return _decision(decision, "unknown", backend, required, None,
                          estimate, chain,

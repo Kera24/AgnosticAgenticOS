@@ -153,6 +153,10 @@ def cmd_project_start(cfg, args):
 
 def cmd_project_run(cfg, args):
     from core.project import project_run
+    if args.now:
+        from core.scheduler import Scheduler
+        Scheduler(cfg, MEMORY).resume(force=True)
+        print("cooling override: next cycle may start immediately")
     result = project_run(cfg, overrides=_overrides(args),
                          max_cycles=args.max_cycles)
     _print(result)
@@ -456,6 +460,8 @@ def main(argv):
     parser.add_argument("--max-cycles", type=int, default=1)
     parser.add_argument("--no-smoke", action="store_true")
     parser.add_argument("--revision")
+    parser.add_argument("--now", action="store_true",
+                        help="clear cooling and start immediately")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--dev", action="store_true")

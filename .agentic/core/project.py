@@ -250,7 +250,10 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
         return {"status": "no_project", "detail": "run project-start first"}
     ledger, board, scheduler, caller, log = _context(
         cfg, p["memory"], overrides=overrides, caller=caller, clock=clock, **kw)
-    ok, reason = scheduler.eligible()
+    cycle_minutes = ((cfg.get("scheduler") or {}).get("cycle") or {}).get(
+        "maximum_duration_minutes",
+        (cfg.get("cycle") or {}).get("maximum_duration_minutes"))
+    ok, reason = scheduler.eligible(cycle_minutes=cycle_minutes)
     if not ok:
         return {"status": "not_eligible", "reason": reason,
                 "next_run_at": scheduler.state.get("next_run_at")}
@@ -332,9 +335,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     log({"event": "capacity_decision", **decision})
     if decision["decision"] == "wait":
         until = decision.get("wait_until")
-        scheduler.state.update(state="cooling", cooling_reason="capacity",
-                               next_run_at=until)
-        scheduler.save()
+        scheduler.defer(decision["reason"],
+                        decision.get("required_estimated_tokens"),
+                        decision.get("confidence"), until)
         return {"status": "waiting_capacity", "until": until,
                 "reason": decision["reason"]}
     if decision["decision"] == "human_required":

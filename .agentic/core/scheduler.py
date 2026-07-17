@@ -43,7 +43,8 @@ class Scheduler:
         return {"state": "idle", "current_cycle": None, "next_run_at": None,
                 "cooling_reason": None, "selected_backend": None,
                 "paused_backends": [], "project_status": "none",
-                "last_heartbeat": None}
+                "last_heartbeat": None, "failure_streak": 0,
+                "deferred": None}
 
     def save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -68,7 +69,7 @@ class Scheduler:
                        float(cooling.get("maximum_minutes", 360))))
 
     def cooldown_minutes(self, outcome, retry_after_seconds=None,
-                         breaker_wait_seconds=None):
+                         breaker_wait_seconds=None, failure_streak=0):
         cooling = self._cooling_cfg()
         if outcome == "success":
             minutes = float(cooling.get("after_success_minutes", 30))
@@ -79,19 +80,44 @@ class Scheduler:
                 minutes = breaker_wait_seconds / 60.0
             else:
                 minutes = 60.0 if outcome == "usage_limit" else 15.0
-        else:   # ordinary failure
+        else:   # ordinary failure; consecutive failures escalate (adaptive)
             minutes = float(cooling.get("after_failure_minutes", 30))
+            dynamic = cooling.get("dynamic", cooling.get("adaptive", True))
+            if dynamic and failure_streak > 1:
+                minutes *= 2 ** min(failure_streak - 1, 3)
         return self._clamp(minutes)
 
     def start_cooling(self, outcome, retry_after_seconds=None,
                       breaker_wait_seconds=None):
-        minutes = self.cooldown_minutes(outcome, retry_after_seconds,
-                                        breaker_wait_seconds)
+        if outcome == "success":
+            self.state["failure_streak"] = 0
+        elif outcome not in ("rate_limit", "usage_limit"):
+            self.state["failure_streak"] = \
+                int(self.state.get("failure_streak") or 0) + 1
+        minutes = self.cooldown_minutes(
+            outcome, retry_after_seconds, breaker_wait_seconds,
+            failure_streak=int(self.state.get("failure_streak") or 0))
         until = self.clock() + _dt.timedelta(minutes=minutes)
         self.state.update(state="cooling", cooling_reason=outcome,
-                          next_run_at=until.isoformat(timespec="seconds"))
+                          next_run_at=until.isoformat(timespec="seconds"),
+                          deferred=None)
         self.save()
         return until
+
+    def defer(self, reason, required_estimated_tokens=None, confidence=None,
+              until=None):
+        """Persist WHY the next cycle is not starting (capacity shortfall,
+        unavailable backends, …) plus the estimate behind the decision."""
+        self.state.update(
+            state="cooling", cooling_reason="capacity",
+            next_run_at=until,
+            deferred={"reason": reason,
+                      "required_estimated_tokens": required_estimated_tokens,
+                      "capacity_confidence": confidence,
+                      "next_eligible": until,
+                      "recorded_at": self.clock().isoformat(
+                          timespec="seconds")})
+        self.save()
 
     # -- eligibility -----------------------------------------------------------
     def in_operating_window(self):
@@ -108,14 +134,40 @@ class Scheduler:
             return start <= now <= stop
         return now >= start or now <= stop   # overnight window
 
-    def eligible(self):
-        """(eligible: bool, reason: str). Never blocks."""
+    def window_minutes_remaining(self):
+        """Minutes until the operating window closes; None when the window
+        is disabled (unbounded)."""
+        window = (self.cfg.get("scheduler") or {}).get("operating_window") \
+            or {}
+        if not window.get("enabled"):
+            return None
+        now = self.clock()
+        try:
+            stop = _dt.time.fromisoformat(str(window.get("stop", "23:59")))
+        except ValueError:
+            return None
+        stop_dt = now.replace(hour=stop.hour, minute=stop.minute,
+                              second=0, microsecond=0)
+        if stop_dt < now:
+            stop_dt += _dt.timedelta(days=1)
+        return (stop_dt - now).total_seconds() / 60.0
+
+    def eligible(self, cycle_minutes=None):
+        """(eligible: bool, reason: str). Never blocks. When cycle_minutes
+        is given, the whole cycle envelope must fit in the remaining
+        operating window."""
         if self.state["state"] == "paused":
             return False, "paused by user"
         if self.state["state"] == "complete":
             return False, "project complete"
         if not self.in_operating_window():
             return False, "outside operating window"
+        if cycle_minutes:
+            remaining = self.window_minutes_remaining()
+            if remaining is not None and remaining < float(cycle_minutes):
+                return False, ("insufficient operating window: %.0f min "
+                               "left, cycle needs %s" % (remaining,
+                                                         cycle_minutes))
         next_run = self.state.get("next_run_at")
         if next_run:
             try:
@@ -138,9 +190,15 @@ class Scheduler:
         self.state.update(state="paused")
         self.save()
 
-    def resume(self):
+    def resume(self, force=False):
+        """Unpause; with force=True (explicit user override) also clear any
+        cooling wait so the next cycle may start immediately."""
         if self.state["state"] == "paused":
             self.state.update(state="idle")
+            self.save()
+        if force and self.state["state"] in ("cooling", "idle"):
+            self.state.update(state="idle", next_run_at=None,
+                              cooling_reason=None, deferred=None)
             self.save()
 
     def mark_complete(self):
