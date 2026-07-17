@@ -48,7 +48,8 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
     """Build the single call surface used by every agent role. Every prompt
     is assembled by the Context Broker (ADR 0001) — never ad hoc."""
     from .context.broker import BrokerError
-    from .context.compose import compose, retrieval_items
+    from .context.compose import compose, retrieval_items, retrieval_query
+    from .memsvc import memory_items
     memory_dir = memory_dir or os.path.join(str(config_mod.AGENTIC_DIR),
                                             "memory")
 
@@ -59,6 +60,8 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
             retrieved = retrieval_items(cfg, role, input_data, workspace,
                                         memory_dir, runner=runner,
                                         which=which)
+            retrieved += memory_items(cfg, memory_dir,
+                                      retrieval_query(input_data))
             package = compose(cfg, role, prompt, input_data, schema,
                               memory_dir=memory_dir, backend=chain[0],
                               extra_items=retrieved)
@@ -138,6 +141,17 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
     return {"status": "started", "tasks": len(tasks),
             "milestones": len(out["milestones"]),
             "human_decisions": out.get("human_decisions", [])}
+
+
+def _remember(cfg, memory_dir, rtype, title, summary, **kw):
+    """Deterministic, best-effort memory write. Never breaks a cycle."""
+    try:
+        from .memsvc import get_memory, memory_config
+        if not memory_config(cfg)["enabled"]:
+            return None
+        return get_memory(cfg, memory_dir).save(rtype, title, summary, **kw)
+    except Exception:   # noqa: BLE001
+        return None
 
 
 def _index_project(cfg, root, memory_dir, log, full, changed=None):
@@ -233,6 +247,11 @@ def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
                                           "usage_limit") else "failure"
     until = scheduler.start_cooling(cool_outcome,
                                     retry_after_seconds=retry_after)
+    _remember(cfg, p["memory"], "cycle_outcome",
+              "cycle %s: %s" % (run_id, outcome),
+              (detail or outcome)[:400], task_id=(task or {}).get("id"),
+              cycle_id=run_id, source="cycle",
+              importance=0.6 if outcome == "success" else 0.7)
     log({"event": "cycle_finished", "run_id": run_id, "outcome": outcome,
          "detail": redact(str(detail))[:300],
          "cooling_until": until.isoformat(timespec="seconds")})
@@ -304,6 +323,11 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
             blocking_reason=blocking_reason or (detail[:200] if block else None))
         if block:
             projstate.add_blocker(a, task["id"], blocking_reason or detail)
+            _remember(cfg, p["memory"], "failed_attempt",
+                      "task %s blocked" % task["id"],
+                      (blocking_reason or detail)[:400],
+                      task_id=task["id"], cycle_id=run_id,
+                      source="cycle", importance=0.8)
         return _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task,
                              backend, outcome, 0, started_at, detail,
                              retry_after)
@@ -427,6 +451,12 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         qa_out = qa["structured_output"] if qa["ok"] else None
         verdict = (qa_out or {}).get("verdict", "uncertain")
         log({"event": "qa_review", "run_id": run_id, "verdict": verdict})
+        if verdict != "pass":
+            _remember(cfg, p["memory"], "reviewer_finding",
+                      "QA %s on task %s" % (verdict, task["id"]),
+                      str((qa_out or {}).get("reason", verdict))[:400],
+                      task_id=task["id"], cycle_id=run_id, source="qa",
+                      importance=0.7)
         if verdict == "pass" and (qa_out or {}).get(
                 "test_integrity_preserved", False):
             break
@@ -457,6 +487,12 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         sec_verdict = (sec_out or {}).get("verdict", "uncertain")
         log({"event": "security_review", "run_id": run_id,
              "verdict": sec_verdict})
+        if sec_verdict != "pass":
+            _remember(cfg, p["memory"], "security_finding",
+                      "security %s on task %s" % (sec_verdict, task["id"]),
+                      str((sec_out or {}).get("reason", sec_verdict))[:400],
+                      task_id=task["id"], cycle_id=run_id,
+                      source="security", importance=0.9)
         if sec_verdict == "human_review_required":
             notify.notify(cfg, "security_decision",
                           "Security decision needed",

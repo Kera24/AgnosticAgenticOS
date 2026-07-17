@@ -25,6 +25,13 @@ Context intelligence:
   python .agentic/run context reindex
   python .agentic/run context explain <package-id>
 
+Memory (progressive disclosure):
+  python .agentic/run memory status|compact|export
+  python .agentic/run memory search "<query>"
+  python .agentic/run memory timeline <id>
+  python .agentic/run memory show <id...>
+  python .agentic/run memory forget <id>
+
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
 """
@@ -266,6 +273,55 @@ def cmd_context(cfg, args):
     return 2
 
 
+def cmd_memory(cfg, args):
+    """memory status | search "<q>" | timeline <id> | show <id...> |
+    forget <id> | compact | export [path]"""
+    from core.memsvc import get_memory, memory_config
+    service = get_memory(cfg, MEMORY)
+    sub = args.plan or "status"
+    extra = args.extra or []
+    if sub == "status":
+        _print(service.status())
+        return 0
+    if sub == "search":
+        if not extra:
+            print("usage: memory search \"<query>\"", file=sys.stderr)
+            return 2
+        _print(service.search(" ".join(extra)))
+        return 0
+    if sub == "timeline":
+        if not extra:
+            print("usage: memory timeline <id>", file=sys.stderr)
+            return 2
+        _print(service.timeline(extra[0]))
+        return 0
+    if sub == "show":
+        if not extra:
+            print("usage: memory show <id...>", file=sys.stderr)
+            return 2
+        _print(service.details(extra))
+        return 0
+    if sub == "forget":
+        if not extra:
+            print("usage: memory forget <id>", file=sys.stderr)
+            return 2
+        deleted = service.forget(extra[0])
+        _print({"forgotten": deleted})
+        return 0 if deleted else 1
+    if sub == "compact":
+        removed = service.compact(
+            int(memory_config(cfg).get("retention_days", 180)))
+        _print({"removed": removed})
+        return 0
+    if sub == "export":
+        out = extra[0] if extra else "memory-export.json"
+        count = service.export(out)
+        _print({"exported": count, "path": out})
+        return 0
+    print("unknown memory subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_ui(cfg, args):
     from ui.serve import run_ui
     return run_ui(cfg, port=args.port,
@@ -281,7 +337,7 @@ COMMANDS = {
     "project-status": cmd_project_status, "project-pause": cmd_project_pause,
     "project-review": cmd_project_review, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
-    "context": cmd_context,
+    "context": cmd_context, "memory": cmd_memory,
 }
 
 

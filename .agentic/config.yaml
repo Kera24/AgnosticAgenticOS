@@ -165,6 +165,14 @@ context:
     expansion_limit: 4
     excluded_paths: []          # extra globs, e.g. ["vendor/**"]
 
+# OS-owned persistent memory (ADR 0003): durable decisions, outcomes,
+# failures and findings — never transcripts, never credentials. Injection is
+# compact summaries only, bounded by inject_limit; details load on demand.
+memory:
+  enabled: true
+  retention_days: 180
+  inject_limit: 8
+
 budget:
   daily_limit_usd: 5
   per_run_limit_usd: 2

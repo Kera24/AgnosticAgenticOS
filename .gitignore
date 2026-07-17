@@ -24,6 +24,14 @@
 # context-package ledger (ids/counts/reasons only, but machine-local)
 .agentic/memory/context-ledger.jsonl
 
+# persistent memory database (project decisions/outcomes; machine-local)
+.agentic/memory/memory.db
+.agentic/memory/memory.db-wal
+.agentic/memory/memory.db-shm
+.agentic/memory/memory.db.corrupt-*
+.agentic/memory/code-index/
+memory-export.json
+
 # mutable memory ledgers (created on demand; templates ship in git history)
 .agentic/memory/STATE.md
 .agentic/memory/decisions.jsonl
