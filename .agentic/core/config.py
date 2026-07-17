@@ -91,6 +91,8 @@ def load_config(path=None, env=None, profile=None, cli_overrides=None):
         set_path(cfg, override[0], override[1])
     if cfg.get("project", {}).get("name") in (None, "auto"):
         cfg.setdefault("project", {})["name"] = repo_root(cfg).name
+    from .migrate import migrate
+    cfg["_migration"] = migrate(cfg)
     return cfg
 
 

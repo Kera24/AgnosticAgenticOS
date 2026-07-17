@@ -36,6 +36,13 @@ def run_doctor(cfg=None, env=None):
     except Exception as exc:
         add("error", "config.yaml failed to load: %s" % exc)
         return _finish(checks)
+    migration = cfg.get("_migration") or {}
+    if migration.get("sections_filled"):
+        add("ok", "config version %s (defaults applied for: %s)"
+            % (migration.get("to_version"),
+               ", ".join(migration["sections_filled"])))
+    else:
+        add("ok", "config version %s" % migration.get("to_version", "?"))
 
     roles = cfg.get("roles", {}) or {}
     providers = cfg.get("providers", {}) or {}

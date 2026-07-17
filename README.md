@@ -26,6 +26,45 @@ an AI — and no agent approves its own work.
 No SDKs; the only dependency is Python 3.8+ with PyYAML. API keys are never
 required when your selected backends are CLI or local.
 
+## Context-efficient platform (v2)
+
+Every model prompt is assembled by a deterministic, OS-owned **Context
+Broker** — budgeted, deduplicated, provenance-tracked, with untrusted
+content fenced — fed by pluggable **code intelligence** (none/native/CCE),
+an OS-owned **memory** with progressive disclosure, an Obsidian-compatible
+**knowledge vault**, and a pinned, reviewed **skills registry**. Roles can
+route by **capability** instead of fixed provider names, reviewers stay
+independent from workers, repair loops are fingerprint-bounded, API
+backends use provider prompt caching where it actually exists, and the
+local dashboard shows all of it. Version-1 configurations keep working
+unchanged (in-memory migration).
+
+Focused documentation in `docs/`:
+[architecture](docs/architecture.md) ·
+[context broker](docs/context-broker.md) ·
+[code intelligence](docs/code-intelligence.md) ·
+[memory](docs/memory.md) ·
+[knowledge vault](docs/knowledge-vault.md) ·
+[skills](docs/skills.md) ·
+[model routing](docs/model-routing.md) ·
+[prompt caching](docs/prompt-caching.md) ·
+[capacity](docs/capacity.md) ·
+[dashboard](docs/dashboard.md) ·
+[Windows setup](docs/windows-setup.md) ·
+[troubleshooting](docs/troubleshooting.md) ·
+[migration](docs/migration.md) ·
+[security model](docs/security-model.md) ·
+[mocked autonomous build](docs/mocked-autonomous-build.md) ·
+ADRs in `docs/adr/` · evidence report in
+[docs/evidence-report.md](docs/evidence-report.md).
+
+New CLI groups (PowerShell: `py .agentic/run <cmd>`):
+`context status|search|reindex|explain`,
+`memory status|search|timeline|show|forget|compact|export`,
+`knowledge status|rebuild|validate|open`,
+`skills list|inspect|add|enable|disable|verify|remove|recommend`,
+`backends discover|decisions`, `project-run --now`.
+
 ## Architecture
 
 ```

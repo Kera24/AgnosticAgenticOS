@@ -1,0 +1,77 @@
+# Example machine configuration (copy relevant parts into
+# .agentic/config.machine.yaml — git-ignored, machine-local, no secrets).
+#
+# Profile: Claude Code subscription CLI as the primary architect/reviewer,
+# Codex CLI for coding, Ollama as the free local fallback. No API keys
+# required anywhere in this profile.
+
+version: 2
+
+backends:
+  claude:
+    type: cli
+    kind: configured
+    binary: claude
+    context_window: 200000        # only if you know it; never guessed
+    capabilities: {reasoning: highest, coding: high, review: high}
+  codex:
+    type: cli
+    kind: codex
+    binary: codex
+    capabilities: {coding: highest, reasoning: high, review: high}
+  ollama:
+    type: local
+    model: qwen3.5:latest         # a GENERATIVE model; embedding models
+                                  # are refused for coding roles
+
+routing:
+  mode: capability
+  policies:
+    reviewer_different_from_worker: true
+    allow_local_fallback: true
+  agents:
+    architect:
+      capabilities: {reasoning: highest, long_running: true}
+      preferred:
+        - {backend: claude, model: auto}
+        - {backend: codex, model: auto}
+    coder:
+      capabilities: {coding: high}
+      preferred:
+        - {backend: codex, model: auto}
+        - {backend: claude, model: auto}
+        - {backend: ollama, model: auto}
+    qa:
+      independent_from: coder
+      capabilities: {reasoning: high, review: high}
+    security:
+      independent_from: coder
+      capabilities: {review: high}
+
+context:
+  code_intelligence:
+    provider: cce                 # detected; degrades to native, then none
+    fallback: native
+
+memory:
+  enabled: true
+
+knowledge:
+  enabled: true                   # open .agentic/knowledge as an Obsidian vault
+
+skills:
+  enabled: true
+  auto_install: false             # installation stays an explicit CLI action
+
+interaction:
+  mode: completion_only           # notify at project completion only
+
+scheduler:
+  cooling:
+    after_success_minutes: 30
+    after_failure_minutes: 30
+    dynamic: true
+  capacity:
+    safety_multiplier: 1.35
+    stop_before_exhaustion: true
+    include_review_reserve: true
