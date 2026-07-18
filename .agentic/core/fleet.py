@@ -119,9 +119,10 @@ class SlotManager:
                     totals[slot] = totals.get(slot, 0) + count
         return dict(totals, allocations=allocations)
 
-    def acquire(self, cfg, project_id, backend, extra_slots=None):
+    def acquire(self, cfg, project_id, backend, extra_slots=None,
+                dry=False):
         """Atomically claim the slots one project cycle needs. Returns
-        (ok, reason)."""
+        (ok, reason). dry=True only answers whether it WOULD fit."""
         limits = concurrency_config(cfg)
         wanted = {"model": 1}
         wanted.update(extra_slots or {})
@@ -162,6 +163,8 @@ class SlotManager:
                     if usage.get(slot, 0) + need > pools[slot]:
                         return False, "waiting for a %s slot" \
                             % slot.replace("_", " ")
+            if dry:
+                return True, "would fit"
             allocations[project_id] = {
                 "slots": wanted, "backend": backend,
                 "pid": os.getpid(), "machine": _machine(),
@@ -285,10 +288,11 @@ def classify_project(cfg, registry, record, clock=None):
 
 # -- planning -----------------------------------------------------------------------
 
-def plan(cfg, registry, clock=None, home=None):
+def plan(cfg, registry, clock=None, home=None, dry=False):
     """Pure scheduling decision for one tick: which projects to start now,
     and exactly why every other project is waiting. Persisted to the
-    decision log."""
+    decision log. dry=True (dashboard preview) neither claims slots nor
+    updates fairness stamps."""
     clock = clock or _now
     home = home or registry.home
     fleet_state = load_fleet_state(home)
@@ -361,7 +365,7 @@ def plan(cfg, registry, clock=None, home=None):
                 .get("type") == "local":
             extra["heavy_local"] = 1
         ok, slot_reason = slots.acquire(cfg, project_id, backend,
-                                        extra_slots=extra)
+                                        extra_slots=extra, dry=dry)
         if not ok:
             decisions["waiting"].append({"project": project_id,
                                          "reason": slot_reason})
@@ -371,10 +375,12 @@ def plan(cfg, registry, clock=None, home=None):
                                    "capacity_confidence":
                                        capacity["confidence"]})
         started += 1
-        registry.update(project_id, metadata=dict(
-            record.get("metadata") or {},
-            last_scheduled_at=clock().isoformat(timespec="seconds")))
-    _log_decision(home, decisions)
+        if not dry:
+            registry.update(project_id, metadata=dict(
+                record.get("metadata") or {},
+                last_scheduled_at=clock().isoformat(timespec="seconds")))
+    if not dry:
+        _log_decision(home, decisions)
     return decisions
 
 

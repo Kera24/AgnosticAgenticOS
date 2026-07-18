@@ -12,6 +12,8 @@ import { Verification } from "./pages/Verification";
 import { Activity } from "./pages/Activity";
 import { Settings } from "./pages/Settings";
 import { Context } from "./pages/Context";
+import { Portfolio } from "./pages/Portfolio";
+import { Mcp } from "./pages/Mcp";
 import { Memory } from "./pages/Memory";
 import { Knowledge } from "./pages/Knowledge";
 import { Skills } from "./pages/Skills";
@@ -35,6 +37,8 @@ export function App() {
           <Routes>
             <Route element={<Shell />}>
               <Route index element={<Overview />} />
+              <Route path="portfolio" element={<Portfolio />} />
+              <Route path="mcp" element={<Mcp />} />
               <Route path="projects" element={<Projects />} />
               <Route path="build" element={<Build />} />
               <Route path="agents" element={<Agents />} />

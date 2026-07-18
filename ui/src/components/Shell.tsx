@@ -27,7 +27,9 @@ import { ErrorBoundary } from "./ErrorBoundary";
 
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard, end: true },
+  { to: "/portfolio", label: "Portfolio", icon: FolderGit2 },
   { to: "/projects", label: "Projects", icon: FolderGit2 },
+  { to: "/mcp", label: "MCP", icon: Waypoints },
   { to: "/build", label: "Build Control", icon: Play },
   { to: "/agents", label: "Agents", icon: Bot },
   { to: "/backends", label: "Backends", icon: Server },

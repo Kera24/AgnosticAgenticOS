@@ -446,6 +446,129 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def routing_view():
         return intel.routing_snapshot(cfg())
 
+    # -- multi-project portfolio / fleet / mcp / auth (MP Phase 9) -----------
+    from ui import portfolio as portfolio_mod
+    from core.registry import RegistryError
+
+    class AddProjectBody(BaseModel):
+        name: str = Field(max_length=100)
+        root: str = Field(max_length=500)
+        plan: str | None = Field(default="plan.md", max_length=200)
+        create: bool = False
+
+    class ActionBody(BaseModel):
+        confirm: bool = False
+
+    DESTRUCTIVE_PROJECT_ACTIONS = {"archive", "remove", "stop"}
+    PROJECT_ACTIONS = {"init", "doctor", "pause", "resume", "stop",
+                       "enable", "archive", "remove"}
+
+    @app.get(API + "/portfolio")
+    def portfolio_view():
+        return portfolio_mod.portfolio_snapshot(cfg())
+
+    @app.post(API + "/portfolio/add")
+    def portfolio_add(body: AddProjectBody):
+        try:
+            record = portfolio_mod.add_project(cfg(), body.name, body.root,
+                                               plan=body.plan,
+                                               create=body.create)
+        except RegistryError as exc:
+            raise HTTPException(422, str(exc.detail
+                                         if hasattr(exc, "detail")
+                                         else exc))
+        audit("ui_project_add", project=record["id"],
+              root=record["root_path"], created=body.create)
+        bus.publish("state", {"changed": "portfolio"})
+        return record
+
+    @app.post(API + "/portfolio/{project_id}/{action}")
+    def portfolio_action(project_id: str, action: str, body: ActionBody):
+        if action not in PROJECT_ACTIONS:
+            raise HTTPException(404, "unknown action")
+        if action in DESTRUCTIVE_PROJECT_ACTIONS and not body.confirm:
+            raise HTTPException(422, "confirmation required for %s"
+                                % action)
+        try:
+            result = portfolio_mod.project_action(cfg(), project_id[:64],
+                                                  action)
+        except RegistryError as exc:
+            raise HTTPException(404, str(exc.detail
+                                         if hasattr(exc, "detail")
+                                         else exc))
+        audit("ui_project_action", project=project_id[:64], action=action)
+        bus.publish("state", {"changed": "portfolio"})
+        return result
+
+    @app.get(API + "/fleet")
+    def fleet_view():
+        return portfolio_mod.fleet_snapshot(cfg())
+
+    @app.post(API + "/fleet/pause")
+    def fleet_pause(body: ActionBody):
+        if not body.confirm:
+            raise HTTPException(422, "confirmation required")
+        from core import fleet as fleet_mod
+        from core.registry import ProjectRegistry
+        state = fleet_mod.set_global_pause(ProjectRegistry().home, True)
+        audit("ui_fleet_pause")
+        bus.publish("state", {"changed": "fleet"})
+        return state
+
+    @app.post(API + "/fleet/resume")
+    def fleet_resume():
+        from core import fleet as fleet_mod
+        from core.registry import ProjectRegistry
+        state = fleet_mod.set_global_pause(ProjectRegistry().home, False)
+        audit("ui_fleet_resume")
+        bus.publish("state", {"changed": "fleet"})
+        return state
+
+    @app.get(API + "/auth")
+    def auth_view():
+        return portfolio_mod.auth_snapshot(cfg())
+
+    @app.get(API + "/mcp")
+    def mcp_view():
+        return portfolio_mod.mcp_snapshot(cfg())
+
+    @app.post(API + "/mcp/{server_id}/{action}")
+    def mcp_action(server_id: str, action: str, body: ActionBody):
+        from core.mcp import MCPError
+        if action in ("enable", "disable", "remove") and not body.confirm:
+            raise HTTPException(422, "confirmation required")
+        try:
+            result = portfolio_mod.mcp_action(cfg(), server_id[:64],
+                                              action)
+        except MCPError as exc:
+            raise HTTPException(422, str(exc))
+        except ValueError:
+            raise HTTPException(404, "unknown action")
+        audit("ui_mcp_action", server=server_id[:64], action=action)
+        return result
+
+    @app.get(API + "/skills/market")
+    def skills_market():
+        return portfolio_mod.market_snapshot(cfg())
+
+    @app.post(API + "/skills/market/{skill_id}/{action}")
+    def skills_market_action(skill_id: str, action: str,
+                             body: ActionBody):
+        from core.skillreg import SkillError
+        if action in ("approve", "reject", "rollback") and \
+                not body.confirm:
+            raise HTTPException(422, "confirmation required")
+        try:
+            result = portfolio_mod.market_action(cfg(), skill_id[:64],
+                                                 action)
+        except SkillError as exc:
+            raise HTTPException(422, str(exc))
+        except ValueError:
+            raise HTTPException(404, "unknown action")
+        audit("ui_skill_market_action", skill=skill_id[:64],
+              action=action)
+        return result
+
     # -- settings --------------------------------------------------------------------
     @app.get(API + "/settings")
     def get_settings():
