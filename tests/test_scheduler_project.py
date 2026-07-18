@@ -386,12 +386,18 @@ def test_no_push_merge_or_deploy_anywhere_in_core():
     from conftest import AGENTIC_SRC
     banned = ["\"push\"", "'push'", "\"pull\"", "'pull'", "\"deploy\""]
     merge_allowed = {"taskspace.py"}
+    # supabasex.py's "push" is `supabase db push` — the policy-gated,
+    # dry-run-first, approval-guarded migration apply (MP Phase 7); it is
+    # not a git/deploy operation.
+    push_allowed = {"supabasex.py"}
     offenders = []
     for path in list(pathlib.Path(str(AGENTIC_SRC / "core")).rglob("*.py")) \
             + list(pathlib.Path(str(AGENTIC_SRC / "providers")).rglob("*.py")):
         text = path.read_text(encoding="utf-8", errors="replace")
         for token in banned:
             if token in text:
+                if "push" in token and path.name in push_allowed:
+                    continue
                 offenders.append("%s: %s" % (path.name, token))
         if ("\"merge\"" in text or "'merge'" in text) and \
                 path.name not in merge_allowed:
