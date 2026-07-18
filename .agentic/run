@@ -422,6 +422,72 @@ def cmd_project(cfg, args):
     return 2
 
 
+def cmd_mcp(cfg, args):
+    """mcp list|add|show|authenticate|test|tools|enable|disable|remove|
+    review"""
+    from core.mcp import MCPError, MCPGateway
+    from core.registry import ProjectRegistry
+    gateway = MCPGateway(cfg, ProjectRegistry().home)
+    sub = args.plan or "list"
+    extra = args.extra or []
+    try:
+        if sub == "list":
+            _print([{k: s.get(k) for k in
+                     ("id", "transport", "scope", "project_id", "enabled",
+                      "reviewed", "read_only", "authentication_status")}
+                    for s in gateway.list()])
+            return 0
+        if sub == "add":
+            if not args.name:
+                print("usage: mcp add --name <name> --transport stdio "
+                      "--command \"npx -y @supabase/mcp-server\" "
+                      "[--scope project --project <id>] [--url URL]",
+                      file=sys.stderr)
+                return 2
+            record = gateway.add(
+                args.name, transport=args.transport or "stdio",
+                command=args.command, url=args.url,
+                scope=args.scope or "machine",
+                project_id=args.project_id)
+            _print(record)
+            print("added DISABLED and UNREVIEWED; `mcp review` then "
+                  "`mcp enable` after inspection")
+            return 0
+        if not extra:
+            print("usage: mcp %s <id>" % sub, file=sys.stderr)
+            return 2
+        server_id = extra[0]
+        if sub == "show":
+            _print(gateway.get(server_id))
+            return 0
+        if sub == "authenticate":
+            _print(gateway.authenticate(server_id))
+            return 0
+        if sub == "test":
+            _print(gateway.test(server_id))
+            return 0
+        if sub == "tools":
+            _print(gateway.tools(server_id))
+            return 0
+        if sub == "review":
+            _print(gateway.mark_reviewed(server_id))
+            return 0
+        if sub == "enable":
+            _print(gateway.enable(server_id))
+            return 0
+        if sub == "disable":
+            _print(gateway.disable(server_id))
+            return 0
+        if sub == "remove":
+            _print(gateway.remove(server_id))
+            return 0
+    except MCPError as exc:
+        print("mcp error: %s" % exc, file=sys.stderr)
+        return 1
+    print("unknown mcp subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_fleet(cfg, args):
     """fleet [tick] | status | pause | resume — multi-project scheduler"""
     from core import fleet
@@ -672,7 +738,7 @@ COMMANDS = {
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
     "context": cmd_context, "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
-    "project": cmd_project, "fleet": cmd_fleet,
+    "project": cmd_project, "fleet": cmd_fleet, "mcp": cmd_mcp,
 }
 
 
@@ -696,6 +762,10 @@ def main(argv):
     parser.add_argument("--priority", type=int)
     parser.add_argument("--allow-platform", action="store_true")
     parser.add_argument("--project", dest="project_id")
+    parser.add_argument("--transport")
+    parser.add_argument("--command")
+    parser.add_argument("--url")
+    parser.add_argument("--scope")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--dev", action="store_true")
