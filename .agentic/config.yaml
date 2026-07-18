@@ -383,6 +383,25 @@ limits:
   ollama:
     maximum_parallel_calls: 1
 
+# Multi-project fleet limits (MP Phase 4). Pools are independent; a
+# project cycle takes one model slot + one backend slot (+ heavy-local for
+# Ollama). Capacity stays labelled reported/estimated/unknown.
+concurrency:
+  maximum_registered_projects: 100
+  maximum_active_projects: 4
+  maximum_model_calls: 2
+  maximum_docker_builds: 1
+  maximum_heavy_local_models: 1
+  maximum_test_jobs: 2
+  per_backend:
+    claude: 1
+    codex: 1
+    qwen: 1
+    ollama: 1
+  per_project:
+    maximum_model_calls: 1
+    maximum_database_mutations: 1
+
 scheduler:
   enabled: true
   cycle:

@@ -422,6 +422,34 @@ def cmd_project(cfg, args):
     return 2
 
 
+def cmd_fleet(cfg, args):
+    """fleet [tick] | status | pause | resume — multi-project scheduler"""
+    from core import fleet
+    from core.registry import ProjectRegistry
+    registry = ProjectRegistry()
+    sub = args.plan or "status"
+    if sub == "tick":
+        result = fleet.run_tick(cfg, registry)
+        _print({k: result[k] for k in ("start", "waiting", "states",
+                                       "results", "global_pause")})
+        return 0
+    if sub == "status":
+        slots = fleet.SlotManager(registry.home)
+        _print({"global_pause":
+                fleet.load_fleet_state(registry.home)["global_pause"],
+                "slots": slots.usage(),
+                "limits": fleet.concurrency_config(cfg),
+                "recent_decisions": fleet.read_decisions(registry.home,
+                                                         limit=3)})
+        return 0
+    if sub in ("pause", "resume"):
+        state = fleet.set_global_pause(registry.home, sub == "pause")
+        _print(state)
+        return 0
+    print("unknown fleet subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_context(cfg, args):
     """context status | search "<query>" | reindex | explain <package-id>"""
     from core.codeintel import get_adapter
@@ -613,7 +641,7 @@ COMMANDS = {
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
     "context": cmd_context, "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
-    "project": cmd_project,
+    "project": cmd_project, "fleet": cmd_fleet,
 }
 
 
