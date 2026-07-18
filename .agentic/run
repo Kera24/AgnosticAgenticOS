@@ -589,6 +589,37 @@ def cmd_skills(cfg, args):
             _print([{k: s[k] for k in ("id", "name", "description")}
                     for s in registry.select("coder", query, limit=5)])
             return 0
+        # -- marketplace lifecycle (MP Phase 5) ---------------------------
+        if sub in ("discover", "quarantine", "evaluate", "approve",
+                   "reject", "check-updates", "compare", "rollback",
+                   "project-skills"):
+            from core.registry import ProjectRegistry
+            from core.skillmarket import SkillMarket
+            market = SkillMarket(cfg, str(AGENTIC_DIR),
+                                 ProjectRegistry().home)
+            if sub == "discover":
+                _print(market.discover(" ".join(extra)))
+                return 0
+            if sub == "check-updates":
+                _print(market.check_updates())
+                return 0
+            if sub == "project-skills":
+                _print(market.project_skills())
+                return 0
+            if not extra:
+                print("usage: skills %s <id>" % sub, file=sys.stderr)
+                return 2
+            action = {"quarantine": market.quarantine,
+                      "evaluate": market.evaluate,
+                      "approve": market.approve,
+                      "reject": market.reject,
+                      "compare": market.compare,
+                      "rollback": market.rollback}[sub]
+            _print(action(extra[0]))
+            if sub == "approve":
+                print("approved at its pinned revision; enable with "
+                      "'skills enable %s'" % extra[0])
+            return 0
     except SkillError as exc:
         print("skills error: %s" % exc, file=sys.stderr)
         return 1
