@@ -135,14 +135,38 @@ def test_stop_and_status(tmp_path, base_cfg, monkeypatch):
                             health=world.health)
     assert report["service"]["healthy"] is True
     assert report["global_pause"] is False
+    # graceful path first: the injected shutdowner succeeds
+    def graceful_shutdowner(port, timeout=3):
+        world.alive.discard(started["pid"])
+        return True
+
     stopped = service.stop(home=str(tmp_path),
-                           terminator=world.terminator)
-    assert stopped == {"status": "stopped", "pid": started["pid"]}
-    assert world.killed == [started["pid"]]
+                           terminator=world.terminator,
+                           shutdowner=graceful_shutdowner)
+    assert stopped["status"] == "stopped"
+    assert stopped["pid"] == started["pid"]
+    assert stopped["graceful"] is True
+    assert world.killed == []                # never force-killed
     report2 = service.status(base_cfg, home=str(tmp_path),
                              health=world.health)
     assert report2["service"] == {"status": "not_running"}
-    assert service.stop(home=str(tmp_path)) == {"status": "not_running"}
+    assert service.stop(home=str(tmp_path),
+                        shutdowner=lambda p, timeout=3: False) \
+        == {"status": "not_running"}
+
+
+def test_stop_falls_back_to_terminate(tmp_path, base_cfg, monkeypatch):
+    world = World(str(tmp_path))
+    patch_alive(monkeypatch, world)
+    started = service.start(base_cfg, home=str(tmp_path),
+                            spawner=world.spawner, health=world.health,
+                            opener=world.opener, prober=world.prober,
+                            no_open=True, poll_interval=0)
+    stopped = service.stop(home=str(tmp_path),
+                           terminator=world.terminator,
+                           shutdowner=lambda p, timeout=3: False)
+    assert stopped["graceful"] is False
+    assert world.killed == [started["pid"]]
 
 
 def test_crash_recovery_clears_stale_state(tmp_path, base_cfg,

@@ -219,20 +219,46 @@ def _try_open(opener, url, result):
         result["note"] = "open %s manually" % url
 
 
-def stop(home=None, terminator=None, health=None):
+def default_shutdowner(port, timeout=3):
+    """Graceful stop via the protected loopback shutdown endpoint."""
+    import urllib.request
+    request = urllib.request.Request(
+        "http://127.0.0.1:%d/api/v1/shutdown" % port,
+        data=json.dumps({"confirm": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):
+            return True
+    except Exception:   # noqa: BLE001
+        return False
+
+
+def stop(home=None, terminator=None, health=None, shutdowner=None):
+    """Graceful shutdown first (loopback endpoint), hard terminate as the
+    fallback."""
     home = home or runtime_home()
     terminator = terminator or default_terminator
+    shutdowner = shutdowner or default_shutdowner
     state = read_state(home)
     if not state or not _pid_alive(state.get("pid")):
         _clear_state(home)
         return {"status": "not_running"}
-    terminator(state["pid"])
-    for _ in range(20):
+    graceful = shutdowner(state.get("port", DEFAULT_PORT))
+    for _ in range(10 if graceful else 0):
         if not _pid_alive(state["pid"]):
             break
         time.sleep(0.2)
+    forced = False
+    if _pid_alive(state["pid"]):
+        terminator(state["pid"])
+        forced = True
+        for _ in range(20):
+            if not _pid_alive(state["pid"]):
+                break
+            time.sleep(0.2)
     _clear_state(home)
-    return {"status": "stopped", "pid": state["pid"]}
+    return {"status": "stopped", "pid": state["pid"],
+            "graceful": graceful and not forced}
 
 
 def restart(cfg, home=None, **kw):

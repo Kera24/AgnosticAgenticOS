@@ -129,10 +129,67 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
                                    "apis": apis}
             return detected, apis
 
-    # -- health / doctor -----------------------------------------------------
+    # -- health / readiness / version / shutdown (desktop boundary) ----------
     @app.get(API + "/health")
     def health():
         return {"ok": True, "version": UI_VERSION, "time": snapshots.now_iso()}
+
+    @app.get(API + "/readiness")
+    def readiness():
+        """Deeper than liveness: configuration loads and the project
+        registry is reachable. A desktop wrapper gates UI display on
+        this."""
+        problems = []
+        try:
+            cfg()
+        except HTTPException as exc:
+            problems.append("configuration: %s" % exc.detail)
+        try:
+            from core.registry import ProjectRegistry
+            ProjectRegistry().load()
+        except Exception as exc:   # noqa: BLE001
+            problems.append("registry: %s" % str(exc)[:200])
+        return {"ready": not problems, "problems": problems,
+                "version": UI_VERSION}
+
+    @app.get(API + "/version")
+    def version():
+        """Update-status interface: what exactly is running."""
+        import subprocess as _sp
+        revision = None
+        try:
+            proc = _sp.run(["git", "rev-parse", "--short", "HEAD"],
+                           cwd=str(config_mod.AGENTIC_DIR.parent),
+                           capture_output=True, text=True, timeout=10)
+            revision = proc.stdout.strip() or None
+        except Exception:   # noqa: BLE001
+            pass
+        configuration = cfg()
+        return {"ui_version": UI_VERSION,
+                "platform_revision": revision,
+                "config_version": (configuration.get("_migration")
+                                   or {}).get("to_version"),
+                "api": "v1"}
+
+    class ShutdownBody(BaseModel):
+        confirm: bool = False
+
+    @app.post(API + "/shutdown")
+    def shutdown(body: ShutdownBody):
+        """Graceful local shutdown for the service lifecycle / a desktop
+        wrapper. Loopback + Origin guards apply like every mutation;
+        confirmation is mandatory."""
+        if not body.confirm:
+            raise HTTPException(422, "confirmation required")
+        audit("ui_shutdown")
+        import threading
+
+        def _exit():
+            watcher.stop()
+            os._exit(0)
+
+        threading.Timer(0.3, _exit).start()
+        return {"shutting_down": True}
 
     @app.get(API + "/doctor")
     def doctor():
