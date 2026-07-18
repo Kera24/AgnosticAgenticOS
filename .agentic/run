@@ -242,6 +242,31 @@ def cmd_backends(cfg, args):
         from core.routing import read_decisions
         _print(read_decisions(MEMORY))
         return 0
+    if args.plan == "auth":
+        from core.authx import backend_auth_report
+        _print(backend_auth_report(cfg, MEMORY))
+        return 0
+    if args.plan == "smoke":
+        # OPT-IN: makes ONE real call and consumes real quota
+        name = (args.extra or [None])[0]
+        if not name:
+            print("usage: backends smoke <backend>", file=sys.stderr)
+            return 2
+        from core.authx import record_verification
+        from core.backends import build_backend
+        from core.config import repo_root
+        try:
+            adapter = build_backend(cfg, name)
+            ok = adapter.smoke_test(str(repo_root(cfg)))
+        except Exception as exc:
+            record_verification(MEMORY, name, False, str(exc))
+            print("smoke FAILED: %s" % exc, file=sys.stderr)
+            return 1
+        record_verification(MEMORY, name, ok,
+                            "smoke test %s" % ("passed" if ok else
+                                               "failed"))
+        _print({"backend": name, "smoke_ok": ok})
+        return 0 if ok else 1
     print(BreakerBoard(MEMORY).render())
     return 0
 

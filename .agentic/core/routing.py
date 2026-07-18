@@ -133,6 +133,13 @@ def capability_chain(cfg, role, memory_dir=None, board=None, ledger=None,
                              "reason": "embedding model %r cannot serve "
                                        "generative roles" % model})
             continue
+        if _is_unverified_qwen_cli(name, bcfg or {}, memory_dir):
+            rejected.append({"backend": name,
+                             "reason": "Qwen CLI is unverified (run an "
+                                       "opt-in smoke test: `backends "
+                                       "smoke qwen`); excluded from "
+                                       "autonomous routing"})
+            continue
         state = board.state(name) if board else "available"
         if state == "authentication_required":
             rejected.append({"backend": name,
@@ -191,6 +198,20 @@ def capability_chain(cfg, role, memory_dir=None, board=None, ledger=None,
                      ("reviewer_different_from_worker",
                       "allow_local_fallback")}}, clock)
     return chain
+
+
+def _is_unverified_qwen_cli(name, bcfg, memory_dir):
+    """The Qwen CLI cannot prove authentication non-interactively; until a
+    user-invoked smoke test passes it is excluded from autonomous routing.
+    Ollama-hosted Qwen models are a different backend and unaffected."""
+    if bcfg.get("type") != "cli":
+        return False
+    if name != "qwen" and bcfg.get("binary") != "qwen":
+        return False
+    if not memory_dir:
+        return True
+    from .authx import read_verification
+    return not (read_verification(memory_dir).get(name) or {}).get("ok")
 
 
 def _record_decision(memory_dir, record, clock=None):

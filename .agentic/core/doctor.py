@@ -149,13 +149,35 @@ def _backend_checks(cfg, add, env):
     except Exception as exc:
         add("warn", "backend detection failed: %s" % exc)
         detected, apis = {}, {}
+    memory = str(AGENTIC_DIR / "memory")
+    try:
+        from .authx import backend_auth_report
+        auth_reports = backend_auth_report(cfg, memory, env=env)
+    except Exception as exc:   # noqa: BLE001
+        auth_reports = {}
+        add("warn", "auth detection failed: %s" % exc)
     for name, info in detected.items():
-        auth = info.get("auth", "?")
-        level = "ok" if auth == "ok" else "warn"
-        add(level, "backend %s: installed (version %s), auth %s%s" % (
-            name, info.get("version") or "?", auth,
-            ", models: %s" % ", ".join(info.get("models", [])[:5])
-            if info.get("models") else ""))
+        report = auth_reports.get(name) or {}
+        state = report.get("state") or info.get("auth", "?")
+        smoke = report.get("smoke_test")
+        ready = report.get("autonomous_ready")
+        level = "ok" if state in ("authenticated", "local_ok") else "warn"
+        line = ("backend %s: installed (version %s) · auth %s%s · smoke %s"
+                " · autonomous %s%s"
+                % (name, info.get("version") or "?", state,
+                   " (%s)" % report["method"] if report.get("method")
+                   else "",
+                   "pass" if (smoke or {}).get("ok")
+                   else ("fail" if smoke else "not recorded"),
+                   "READY" if ready else "not ready",
+                   ", models: %s" % ", ".join(info.get("models", [])[:5])
+                   if info.get("models") else ""))
+        add(level, line)
+        if report.get("credential_conflict"):
+            add("warn", "backend %s: %s" % (name,
+                                            report["credential_conflict"]))
+        if report.get("instructions") and level == "warn":
+            add("warn", "backend %s: %s" % (name, report["instructions"]))
     if not detected:
         add("warn", "no CLI/local backends detected (API-only mode)")
     for pname, info in apis.items():
@@ -173,7 +195,6 @@ def _backend_checks(cfg, add, env):
         add("warn", "routing.primary not configured -- run "
             "`python .agentic/run setup`")
 
-    memory = str(AGENTIC_DIR / "memory")
     board = BreakerBoard(memory)
     for backend, entry in board.data.items():
         state = entry.get("state", "?")
