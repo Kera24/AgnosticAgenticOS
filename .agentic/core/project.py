@@ -274,10 +274,23 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
     lock = projstate.ProjectLock(a)
     if not lock.acquire():
         return {"status": "locked", "detail": "another cycle is running"}
+    from . import taskspace
+    lease = taskspace.ProjectLease(a, cfg.get("project", {}).get("name"),
+                                   clock=clock)
+    acquired, holder = lease.acquire(run_id=run_id)
+    if not acquired:
+        lock.release()
+        return {"status": "lease_held",
+                "detail": "project lease held by %s (pid %s) until %s"
+                          % (holder.get("machine_id"), holder.get("pid"),
+                             holder.get("expires_at")),
+                "holder": {k: holder.get(k) for k in
+                           ("machine_id", "pid", "run_id", "expires_at")}}
     try:
         return _run_cycle_locked(cfg, p, ledger, board, scheduler, caller,
                                  log, overrides, run_id)
     finally:
+        lease.release()
         lock.release()
 
 
@@ -325,6 +338,14 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     # guardrails are OS policy: always read from the platform install,
     # even when project state is redirected to the runtime home
     protected = gitops.load_protected_paths(cfg, str(config_mod.AGENTIC_DIR))
+    try:   # restart recovery: surface abandoned task worktrees
+        from . import taskspace as _ts
+        abandoned = _ts.recover_abandoned(p["root"], a)
+        if abandoned:
+            log({"event": "abandoned_worktrees", "run_id": run_id,
+                 "worktrees": abandoned})
+    except Exception:   # noqa: BLE001 — recovery is best-effort
+        pass
 
     task = projstate.next_task(a)
     if task is None:
@@ -366,6 +387,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
 
     def fail(outcome, detail, retry_after=None, block=False,
              blocking_reason=None):
+        from . import taskspace as _ts
+        _ts.release_claim(a, task["id"])   # failed worktree stays as evidence
         projstate.update_task(
             a, task["id"],
             status="blocked" if block else "pending",
@@ -383,15 +406,16 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                              retry_after)
 
     # conductor -------------------------------------------------------------------
-    worktree = ensure_project_worktree(cfg, p)
+    project_worktree = ensure_project_worktree(cfg, p)
     conducted = caller(
         "conductor", load_prompt("project-conductor.md", shared=False),
         {"task": task,
          "architecture": (projstate.read_yaml(a, "progress.yaml", {}) or {}),
-         "repository_files": _snapshot(worktree, ["**"])["file_list"][:300],
+         "repository_files": _snapshot(project_worktree,
+                                       ["**"])["file_list"][:300],
          "limits": {"max_changed_lines":
                     cfg.get("execution", {}).get("max_changed_lines", 400)}},
-        schema=_schema("work-order.schema.json"), workspace=worktree,
+        schema=_schema("work-order.schema.json"), workspace=project_worktree,
         permissions="read")
     if not conducted["ok"]:
         kind = (conducted.get("error") or {}).get("kind", "?")
@@ -411,6 +435,18 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
             return fail("failure", "work order grants protected path %s"
                         % pattern, block=True,
                         blocking_reason="protected path in work order")
+
+    # file-ownership claim + isolated per-task worktree ------------------------
+    from . import taskspace
+    try:
+        taskspace.claim_paths(a, task["id"], order.get("allowed_paths", [])
+                              + list(task.get("expected_paths") or []),
+                              run_id=run_id)
+    except errors.PolicyError as exc:
+        return fail("failure", "ownership conflict: %s" % exc.detail,
+                    block=True, blocking_reason=exc.detail[:200])
+    worktree = taskspace.create_task_worktree(p["root"], a, task["id"],
+                                              PROJECT_BRANCH)
 
     # coder + deterministic checks + bounded repair/review loops ------------------
     # Two separate bounds (Phase 7): deterministic repair attempts
@@ -595,14 +631,23 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                         blocking_reason="security: %s"
                         % (sec_out or {}).get("reason", sec_verdict)[:200])
 
-    # cycle commit + state update ------------------------------------------------------
+    # cycle commit + integration into agentic/project ------------------------------
     if looks_like_secret(diff):
         _revert_worktree(worktree)
         return fail("failure", "diff appears to contain a secret", block=True,
                     blocking_reason="possible secret in diff")
-    gitops.commit_all(worktree, "agentic cycle %s: %s (%s)"
-                      % (run_id, task["id"], order["item"][:60]))
-    _index_project(cfg, worktree, p["memory"], log, full=False,
+    message = "agentic cycle %s: %s (%s)" % (run_id, task["id"],
+                                             order["item"][:60])
+    gitops.commit_all(worktree, message)
+    try:
+        taskspace.integrate_task(p["root"], project_worktree, worktree,
+                                 task["id"], message)
+    except errors.PolicyError as exc:
+        # dirty target or merge conflict: task worktree kept as evidence
+        return fail("failure", "integration failed: %s" % exc.detail,
+                    block=True, blocking_reason=exc.detail[:200])
+    taskspace.cleanup_task_worktree(p["root"], a, task["id"], success=True)
+    _index_project(cfg, project_worktree, p["memory"], log, full=False,
                    changed=changed)
     projstate.update_task(a, task["id"], status="done",
                           attempts=task["attempts"] + 1, last_result="pass",

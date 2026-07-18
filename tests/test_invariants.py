@@ -98,9 +98,15 @@ def test_auth_and_refusal_never_fallback_kinds():
 # 8. push/merge/deploy absent from autonomous execution -------------------------
 
 FORBIDDEN_GIT = re.compile(
-    r"run_git\(\s*\[\s*[\"'](push|merge|pull)[\"']", re.IGNORECASE)
+    r"run_git\(\s*\[\s*[\"'](push|pull)[\"']", re.IGNORECASE)
+FORBIDDEN_MERGE = re.compile(
+    r"run_git\(\s*\[\s*[\"']merge[\"']", re.IGNORECASE)
 FORBIDDEN_WORDS = re.compile(
     r"[\"'](git push|git merge|deploy --prod|npm publish|twine upload)[\"']")
+
+# local merge into the project's agentic branch is the sanctioned
+# integration mechanism (MP Phase 3) and may exist ONLY here:
+MERGE_ALLOWED = {"taskspace.py"}
 
 
 def test_no_push_merge_deploy_in_autonomous_code():
@@ -109,6 +115,9 @@ def test_no_push_merge_deploy_in_autonomous_code():
         text = read(path)
         if FORBIDDEN_GIT.search(text) or FORBIDDEN_WORDS.search(text):
             offenders.append(path)
+        if FORBIDDEN_MERGE.search(text) and \
+                os.path.basename(path) not in MERGE_ALLOWED:
+            offenders.append(path + " (merge outside taskspace)")
     assert offenders == []
 
 

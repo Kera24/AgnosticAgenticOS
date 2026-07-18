@@ -377,11 +377,15 @@ def test_secret_in_edit_is_rejected(sandbox):
     assert "sk-" not in (worktree / "src" / "app.py").read_text()
 
 
-# 47. no automatic push, merge or deployment -------------------------------------------------------------------------------------
+# 47. no automatic push, remote merge or deployment ------------------------------------------------------------------------------
 def test_no_push_merge_or_deploy_anywhere_in_core():
+    """Push/pull/deploy are banned everywhere. A LOCAL merge into the
+    project's agentic branch is the sanctioned integration mechanism and
+    exists ONLY in taskspace.integrate_task (MP Phase 3)."""
     import pathlib
     from conftest import AGENTIC_SRC
-    banned = ["\"push\"", "'push'", "\"merge\"", "'merge'", "\"deploy\""]
+    banned = ["\"push\"", "'push'", "\"pull\"", "'pull'", "\"deploy\""]
+    merge_allowed = {"taskspace.py"}
     offenders = []
     for path in list(pathlib.Path(str(AGENTIC_SRC / "core")).rglob("*.py")) \
             + list(pathlib.Path(str(AGENTIC_SRC / "providers")).rglob("*.py")):
@@ -389,6 +393,9 @@ def test_no_push_merge_or_deploy_anywhere_in_core():
         for token in banned:
             if token in text:
                 offenders.append("%s: %s" % (path.name, token))
+        if ("\"merge\"" in text or "'merge'" in text) and \
+                path.name not in merge_allowed:
+            offenders.append("%s: merge outside taskspace" % path.name)
     assert offenders == []
 
 
