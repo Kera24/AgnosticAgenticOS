@@ -151,8 +151,9 @@ def test_package_excludes_runtime_and_machine_state(tmp_path):
 
 def test_no_network_calls_outside_provider_transport():
     """urllib/requests/socket connections live only in providers/base.py
-    (the shared transport) and the loopback UI server."""
-    allowed = {"base.py", "serve.py"}
+    (the shared transport), the loopback UI server, and the service
+    lifecycle's 127.0.0.1 health probe (MP Phase 10)."""
+    allowed = {"base.py", "serve.py", "service.py"}
     offenders = []
     for path in source_files("core", "providers", "ui"):
         if os.path.basename(path) in allowed:

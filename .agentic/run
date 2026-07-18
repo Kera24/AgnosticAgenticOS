@@ -7,6 +7,10 @@ Repository maintenance:
   python .agentic/run dry-run           analyse + work order, no edits
   python .agentic/run queue|trust|audit|goals
 
+One-command experience:
+  agentic start [--no-open] [--paused] [--project <id>] [--port N]
+  agentic stop | restart | status | logs [N] | dashboard
+
 Multi-project registry (external application folders):
   python .agentic/run project list
   python .agentic/run project add    --name "App" --root C:\path [--plan-file plan.md]
@@ -746,6 +750,59 @@ def cmd_knowledge(cfg, args):
     return 2
 
 
+def cmd_start(cfg, args):
+    """Single-command localhost experience: lock, service, health wait,
+    browser, recovery."""
+    from core import service
+    result = service.start(cfg, port=args.port, no_open=args.no_open,
+                           paused=args.paused, project=args.project_id)
+    _print(result)
+    if result.get("status") in ("started", "already_running"):
+        print("\nDashboard: %s" % result.get("url"))
+        return 0
+    return 1
+
+
+def cmd_stop(cfg, args):
+    from core import service
+    _print(service.stop())
+    return 0
+
+
+def cmd_restart(cfg, args):
+    from core import service
+    result = service.restart(cfg, port=args.port, no_open=args.no_open)
+    _print(result)
+    return 0 if result.get("status") in ("started",) else 1
+
+
+def cmd_status(cfg, args):
+    from core import service
+    _print(service.status(cfg))
+    return 0
+
+
+def cmd_logs(cfg, args):
+    from core import service
+    report = service.logs(lines=int((args.extra or ["50"])[0])
+                          if (args.extra or [""])[0].isdigit() else 50)
+    print("log file: %s" % report["log_file"])
+    for line in report["lines"]:
+        print(line)
+    return 0
+
+
+def cmd_dashboard(cfg, args):
+    from core import service
+    running = service.running_service()
+    if running and running.get("healthy"):
+        service.default_opener(running["url"])
+        print("opened %s" % running["url"])
+        return 0
+    print("service not running — use `agentic start`", file=sys.stderr)
+    return 1
+
+
 def cmd_ui(cfg, args):
     from ui.serve import run_ui
     return run_ui(cfg, port=args.port,
@@ -764,6 +821,8 @@ COMMANDS = {
     "context": cmd_context, "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
     "project": cmd_project, "fleet": cmd_fleet, "mcp": cmd_mcp,
+    "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
+    "status": cmd_status, "logs": cmd_logs, "dashboard": cmd_dashboard,
 }
 
 
@@ -791,6 +850,7 @@ def main(argv):
     parser.add_argument("--command")
     parser.add_argument("--url")
     parser.add_argument("--scope")
+    parser.add_argument("--paused", action="store_true")
     parser.add_argument("--port", type=int)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--dev", action="store_true")
