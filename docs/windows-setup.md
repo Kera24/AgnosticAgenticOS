@@ -3,6 +3,30 @@
 Requirements: Python 3.10+ (`py` launcher), Git, and at least one backend
 — a subscription CLI (Claude Code / Codex), Ollama, or an API key.
 
+## Install once, start with one command
+
+```powershell
+# add the wrapper to PATH once (or call py .agentic\run directly)
+$env:Path += ";C:\path\to\AgenticOS\bin"
+
+agentic start            # service + health wait + dashboard in the browser
+agentic status           # pid, port, slots, global pause
+agentic logs 100         # tail the service log
+agentic stop             # graceful shutdown (endpoint), then terminate
+```
+
+Launch on login (uses the current localhost experience — no wrapper
+needed):
+
+```powershell
+$startup = [Environment]::GetFolderPath("Startup")
+Copy-Item C:\path\to\AgenticOS\bin\agentic-start.cmd `
+  (Join-Path $startup "AgenticOS.cmd")
+```
+
+Then register application folders — see `docs/projects.md` and
+`docs/fleet.md`.
+
 ```powershell
 # 1. verify the environment
 py .agentic/run doctor

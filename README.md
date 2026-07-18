@@ -39,6 +39,26 @@ backends use provider prompt caching where it actually exists, and the
 local dashboard shows all of it. Version-1 configurations keep working
 unchanged (in-memory migration).
 
+## Multi-project operations (v2.1)
+
+Agentic OS is installed once and manages application folders anywhere on
+the machine: a central registry with explicit absolute workspaces
+(`agentic project add/create/init/start…`), machine-local runtime state
+under `%USERPROFILE%\.agentic-os`, per-task worktrees with file-ownership
+claims and project leases, a fleet scheduler that runs up to four
+projects under independent slot pools with explained waiting reasons, a
+managed skills marketplace (discover → quarantine → evaluate → approve →
+rollback) with a structurally restricted curator, a provider-neutral MCP
+gateway (project/task-scoped, capped, audited, untrusted), project-scoped
+Docker (`agentic-<id>`) and migrations-first Supabase with a production
+protection ladder, accurate Claude/Qwen authentication detection, and a
+one-command experience: `agentic start`. See
+[projects](docs/projects.md) · [fleet](docs/fleet.md) ·
+[supabase & docker](docs/supabase-docker.md) · [mcp](docs/mcp.md) ·
+[authentication](docs/authentication.md) ·
+[desktop wrapper plan](docs/desktop-wrapper.md) · evidence in
+[docs/mp-evidence-report.md](docs/mp-evidence-report.md).
+
 Focused documentation in `docs/`:
 [architecture](docs/architecture.md) ·
 [context broker](docs/context-broker.md) ·
