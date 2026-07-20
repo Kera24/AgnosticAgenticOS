@@ -161,18 +161,29 @@ def _backend_checks(cfg, add, env):
         state = report.get("state") or info.get("auth", "?")
         smoke = report.get("smoke_test")
         ready = report.get("autonomous_ready")
+        smoke_passed = (smoke or {}).get("ok")
         level = "ok" if state in ("authenticated", "local_ok") else "warn"
+        if smoke is not None and not smoke_passed:
+            level = "warn"   # a recorded smoke FAILURE always surfaces
         line = ("backend %s: installed (version %s) · auth %s%s · smoke %s"
                 " · autonomous %s%s"
                 % (name, info.get("version") or "?", state,
                    " (%s)" % report["method"] if report.get("method")
                    else "",
-                   "pass" if (smoke or {}).get("ok")
+                   "pass" if smoke_passed
                    else ("fail" if smoke else "not recorded"),
                    "READY" if ready else "not ready",
                    ", models: %s" % ", ".join(info.get("models", [])[:5])
                    if info.get("models") else ""))
         add(level, line)
+        smoke_detail = (smoke or {}).get("detail")
+        if isinstance(smoke_detail, dict):
+            add(level, "backend %s: smoke exit=%s timeout=%s events=%s"
+                " reason=%s" % (
+                    name, smoke_detail.get("exit_code"),
+                    smoke_detail.get("timed_out"),
+                    ",".join(smoke_detail.get("event_types") or []) or "-",
+                    smoke_detail.get("reason", "?")))
         if report.get("credential_conflict"):
             add("warn", "backend %s: %s" % (name,
                                             report["credential_conflict"]))

@@ -205,3 +205,61 @@ def test_verification_roundtrip(tmp_path):
     data = read_verification(memdir)
     assert data["codex"]["ok"] is True
     assert data["qwen"]["ok"] is False
+
+
+def test_verification_accepts_structured_codex_smoke_detail(tmp_path):
+    """Codex's smoke test carries structured diagnostics (reason,
+    event_types, exit_code, redacted argv) rather than a plain string --
+    record_verification must persist them, bounded, without ever leaking
+    the prompt content."""
+    memdir = str(tmp_path)
+    record_verification(memdir, "codex", False, {
+        "reason": "no item.completed agent_message containing 'CODEX_SMOKE_OK'",
+        "event_types": ["thread.started", "turn.started"],
+        "exit_code": 0, "timed_out": False,
+        "argv": ["codex", "-a", "never", "exec", "<prompt redacted>"]})
+    data = read_verification(memdir)
+    assert data["codex"]["ok"] is False
+    assert data["codex"]["detail"]["event_types"] == \
+        ["thread.started", "turn.started"]
+    assert data["codex"]["detail"]["argv"][-1] == "<prompt redacted>"
+    assert "Reply with exactly" not in json.dumps(data)  # prompt is redacted
+
+
+# -- codex readiness is smoke-gated, not just login-status-gated --------------------
+
+def test_codex_generic_cli_branch_ready_when_never_smoke_tested():
+    """Backward compatible: authenticated + never smoke-tested still reads
+    as ready (smoke tests are opt-in and consume quota)."""
+    import core.authx as authx
+    cfg = {"backends": {"codex": {"type": "cli", "kind": "codex",
+                                  "binary": "codex"}}}
+    runner = FakeRunner([{"exit_code": 0, "stdout": "Logged in using ChatGPT"},
+                         {"exit_code": 0, "stdout": "codex-cli 1.2.3"}])
+    reports = authx.backend_auth_report(cfg, str(tempfile_dir()), runner=runner,
+                                        which=WHICH)
+    assert reports["codex"]["state"] == "authenticated"
+    assert reports["codex"]["autonomous_ready"] is True
+
+
+def test_codex_generic_cli_branch_not_ready_after_failed_smoke_test(tmp_path):
+    """A recorded smoke-test FAILURE must downgrade readiness even though
+    login succeeds -- this is exactly the bug that hid a broken invocation
+    from doctor: authenticated-but-broken was reported as READY."""
+    import core.authx as authx
+    memdir = str(tmp_path / "mem")
+    record_verification(memdir, "codex", False, {
+        "reason": "no turn.completed event"})
+    cfg = {"backends": {"codex": {"type": "cli", "kind": "codex",
+                                  "binary": "codex"}}}
+    runner = FakeRunner([{"exit_code": 0, "stdout": "Logged in using ChatGPT"},
+                         {"exit_code": 0, "stdout": "codex-cli 1.2.3"}])
+    reports = authx.backend_auth_report(cfg, memdir, runner=runner, which=WHICH)
+    assert reports["codex"]["state"] == "authenticated"
+    assert reports["codex"]["autonomous_ready"] is False
+    assert reports["codex"]["smoke_test"]["ok"] is False
+
+
+def tempfile_dir():
+    import tempfile
+    return tempfile.mkdtemp()

@@ -196,10 +196,32 @@ def read_verification(memory_dir):
     except (ValueError, OSError):
         return {}
 
+def _sanitize_detail(detail):
+    """Plain string details are kept as-is; structured diagnostics (e.g.
+    Codex's smoke-test verdict: reason/event_types/exit_code/argv) are kept
+    as a bounded dict so doctor can render them. Never carries credential
+    material -- callers are responsible for redacting the prompt/argv
+    before this point (see `_redact_argv` in cli_codex.py)."""
+    if isinstance(detail, dict):
+        out = {"reason": str(detail.get("reason", ""))[:200]}
+        if detail.get("event_types"):
+            out["event_types"] = [str(t) for t in detail["event_types"]][:12]
+        if "exit_code" in detail:
+            out["exit_code"] = detail["exit_code"]
+        if "timed_out" in detail:
+            out["timed_out"] = bool(detail["timed_out"])
+        if detail.get("argv"):
+            out["argv"] = [str(a) for a in detail["argv"]][:20]
+        if detail.get("cwd"):
+            out["cwd"] = str(detail["cwd"])[:300]
+        return out
+    return str(detail)[:200]
+
+
 def record_verification(memory_dir, backend, ok, detail=""):
     import datetime as _dt
     data = read_verification(memory_dir)
-    data[backend] = {"ok": bool(ok), "detail": str(detail)[:200],
+    data[backend] = {"ok": bool(ok), "detail": _sanitize_detail(detail),
                      "at": _dt.datetime.now().isoformat(
                          timespec="seconds")}
     os.makedirs(memory_dir, exist_ok=True)
@@ -250,9 +272,15 @@ def backend_auth_report(cfg, memory_dir, runner=None, which=None,
                 state = {"ok": "authenticated",
                          "required": "not_authenticated"}.get(status,
                                                               "unknown")
-                reports[name] = _report(name, state,
-                                        autonomous_ready=state ==
-                                        "authenticated")
+                # login status alone is not enough: a recorded smoke-test
+                # FAILURE (e.g. a malformed invocation) must downgrade
+                # readiness even though the CLI is authenticated -- login
+                # succeeding was never proof the invocation itself worked.
+                verified = read_verification(memory_dir).get(name) \
+                    if memory_dir else None
+                ready = state == "authenticated" and \
+                    (verified is None or verified.get("ok") is not False)
+                reports[name] = _report(name, state, autonomous_ready=ready)
         elif btype == "local":
             reports[name] = ollama_auth_detail(runner=runner, which=which)
         else:

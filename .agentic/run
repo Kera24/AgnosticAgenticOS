@@ -266,10 +266,13 @@ def cmd_backends(cfg, args):
             record_verification(MEMORY, name, False, str(exc))
             print("smoke FAILED: %s" % exc, file=sys.stderr)
             return 1
-        record_verification(MEMORY, name, ok,
-                            "smoke test %s" % ("passed" if ok else
-                                               "failed"))
-        _print({"backend": name, "smoke_ok": ok})
+        # adapters that capture structured diagnostics (Codex) get those
+        # persisted so doctor can render exit code / event types / reason;
+        # others keep the plain pass/fail string.
+        detail = getattr(adapter, "last_smoke", None) or \
+            ("smoke test %s" % ("passed" if ok else "failed"))
+        record_verification(MEMORY, name, ok, detail)
+        _print({"backend": name, "smoke_ok": ok, "detail": detail})
         return 0 if ok else 1
     print(BreakerBoard(MEMORY).render())
     return 0

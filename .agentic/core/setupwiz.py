@@ -174,6 +174,7 @@ def run_setup(cfg=None, answers=None, echo=None, runner=None, which=None,
         io.say("\nRunning safe backend smoke tests...")
         merged = config_mod.deep_merge(cfg, machine)
         for name in machine["backends"]:
+            adapter = None
             try:
                 adapter = backends_mod.build_backend(merged, name,
                                                      runner=runner,
@@ -186,6 +187,21 @@ def run_setup(cfg=None, answers=None, echo=None, runner=None, which=None,
             smoke_results[name] = ok
             io.say("  %-8s %s" % (name, "OK" if ok else "FAILED"))
             machine["backends"][name]["smoke_test_passed"] = bool(ok)
+            # adapters with structured diagnostics (Codex): surface the
+            # reason/exit-code/events on failure and persist for doctor.
+            last_smoke = getattr(adapter, "last_smoke", None)
+            if last_smoke is not None:
+                if not ok:
+                    io.say("    reason: %s (exit=%s timeout=%s events=%s)"
+                          % (last_smoke.get("reason"),
+                             last_smoke.get("exit_code"),
+                             last_smoke.get("timed_out"),
+                             ",".join(last_smoke.get("event_types") or [])
+                             or "-"))
+                from . import authx
+                authx.record_verification(
+                    str(config_mod.AGENTIC_DIR / "memory"), name, ok,
+                    last_smoke)
 
     path = str(config_mod.AGENTIC_DIR / "config.machine.yaml")
     with open(path, "w", encoding="utf-8") as fh:

@@ -57,10 +57,13 @@ def test_codex_command_construction():
     backend = CodexCLIBackend("codex", {}, runner=FakeRunner([]),
                               which=lambda b: "x")
     argv = backend.build_argv("coder", "write", "C:/ws")
-    assert argv[:2] == ["codex", "exec"]
+    # global approval option MUST come before the `exec` subcommand:
+    # `codex -a never exec ...`, never `codex exec --ask-for-approval never`
+    assert argv[:4] == ["codex", "-a", "never", "exec"]
+    assert "--ask-for-approval" not in argv
+    assert "--ignore-user-config" in argv
     assert "--ephemeral" in argv and "--json" in argv
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert argv[argv.index("--ask-for-approval") + 1] == "never"
     assert argv[argv.index("--cd") + 1] == "C:/ws"
     assert argv[-1] == "-"          # prompt via stdin
     # read-only sandbox for every non-editing role
@@ -70,6 +73,51 @@ def test_codex_command_construction():
     # write permission alone is not enough — role must be the coder
     argv = backend.build_argv("qa", "write", "C:/ws")
     assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+def test_codex_command_construction_rejects_subcommand_placement_by_default():
+    """Without an explicit capability-proven override, the subcommand-style
+    `codex exec --ask-for-approval never` must never be generated."""
+    backend = CodexCLIBackend("codex", {}, runner=FakeRunner([]),
+                              which=lambda b: "x")
+    argv = backend.build_argv("coder", "write", "C:/ws")
+    assert not (argv[0] == "codex" and argv[1] == "exec" and
+               "--ask-for-approval" in argv[1:3])
+    assert argv.index("-a") < argv.index("exec")
+
+
+def test_codex_command_construction_honours_subcommand_override():
+    """The escape hatch for CLI versions where capability detection proves
+    the subcommand flag is what's supported."""
+    backend = CodexCLIBackend("codex", {"approval_placement": "subcommand"},
+                              runner=FakeRunner([]), which=lambda b: "x")
+    argv = backend.build_argv("coder", "write", "C:/ws")
+    assert argv[:2] == ["codex", "exec"]
+    assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    assert "-a" not in argv
+
+
+def test_codex_command_construction_windows_path_with_spaces():
+    backend = CodexCLIBackend("codex", {}, runner=FakeRunner([]),
+                              which=lambda b: "x")
+    workspace = r"C:/Users/Administrator/OneDrive - Office 365/Desktop/AgenticOS"
+    argv = backend.build_argv("coder", "write", workspace)
+    # argument arrays: the space-containing path stays a single element,
+    # never split or shell-quoted
+    assert argv[argv.index("--cd") + 1] == workspace
+    assert workspace in argv
+    assert not any(" " in a and a != workspace for a in argv)
+
+
+def test_codex_command_construction_never_leaks_unrelated_backend_config():
+    """Codex's own cfg dict is the only source of --model / extra_args --
+    an unrelated Ollama model catalogue key must never surface in argv."""
+    backend = CodexCLIBackend("codex", {"ollama_model": "llama3:8b",
+                                        "model": "gpt-5-codex"},
+                              runner=FakeRunner([]), which=lambda b: "x")
+    argv = backend.build_argv("coder", "write", "C:/ws")
+    assert "llama3:8b" not in argv
+    assert argv[argv.index("--model") + 1] == "gpt-5-codex"
 
 
 def test_codex_invoke_parses_jsonl_and_usage():
@@ -85,6 +133,221 @@ def test_codex_invoke_parses_jsonl_and_usage():
                                "reasoning_tokens": None, "estimated": False}
     assert result["estimated_cost_usd"] == 0.0     # subscription: no USD cost
     assert "# INPUT DATA" in runner.calls[0]["stdin"]
+
+
+def test_codex_invoke_raises_on_terminal_error_event_even_with_exit_zero():
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "s1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "error", "message": "model overloaded"}),
+    ])
+    runner = FakeRunner([{"exit_code": 0, "stdout": stdout}])
+    backend = CodexCLIBackend("codex", {}, runner=runner, which=lambda b: "x")
+    with pytest.raises(errors.UnknownFailureError):
+        backend.invoke("coder", "do it", None, "C:/ws", "write", 60)
+
+
+# -- Codex smoke test: exact confirmed-working manual invocation ------------------------
+CONFIRMED_SMOKE_JSONL = "\n".join([
+    json.dumps({"type": "thread.started", "thread_id": "t1"}),
+    json.dumps({"type": "turn.started"}),
+    json.dumps({"type": "item.completed",
+                "item": {"id": "item_0", "type": "agent_message",
+                         "text": "CODEX_SMOKE_OK"}}),
+    json.dumps({"type": "turn.completed",
+                "usage": {"input_tokens": 11776, "cached_input_tokens": 8960,
+                          "output_tokens": 9, "reasoning_output_tokens": 0}}),
+])
+
+
+def _codex_backend(runner_responses, cfg=None):
+    from providers.cli_codex import CodexCLIBackend as _Codex
+    return _Codex("codex", cfg or {}, runner=FakeRunner(runner_responses),
+                  which=lambda b: "x")
+
+
+def test_codex_smoke_argv_matches_confirmed_working_invocation():
+    backend = _codex_backend([
+        {"stdout": ""}, {"stdout": ""},          # --help probes: no output
+        {"stdout": CONFIRMED_SMOKE_JSONL}])
+    ok = backend.smoke_test("C:/ws")
+    assert ok is True
+    smoke_argv = backend.runner.calls[-1]["argv"]
+    assert smoke_argv[:4] == ["codex", "-a", "never", "exec"]
+    assert "--ignore-user-config" in smoke_argv
+    assert "--ephemeral" in smoke_argv
+    assert "--json" in smoke_argv
+    assert smoke_argv[smoke_argv.index("--sandbox") + 1] == "read-only"
+    assert "workspace-write" not in smoke_argv
+    assert "danger-full-access" not in smoke_argv
+    assert "--dangerously-bypass-approvals-and-sandbox" not in smoke_argv
+    # prompt travels as a positional argument, not via stdin
+    assert smoke_argv[-1].startswith("Reply with exactly:")
+    assert backend.runner.calls[-1]["stdin"] is None
+
+
+def test_codex_smoke_passes_on_confirmed_jsonl_output():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    verdict = evaluate_smoke_jsonl(CONFIRMED_SMOKE_JSONL, exit_code=0,
+                                   timed_out=False)
+    assert verdict["ok"] is True
+    assert verdict["event_types"] == ["thread.started", "turn.started",
+                                      "item.completed", "turn.completed"]
+
+
+def test_codex_smoke_passes_with_extra_jsonl_events_in_any_order():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "t1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "item.started", "item": {"id": "item_0"}}),
+        json.dumps({"type": "item.completed",
+                    "item": {"type": "agent_message",
+                             "text": "prelude\nCODEX_SMOKE_OK\nnote"}}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ])
+    verdict = evaluate_smoke_jsonl(stdout, exit_code=0, timed_out=False)
+    assert verdict["ok"] is True
+
+
+def test_codex_smoke_nonempty_stderr_is_not_a_failure():
+    backend = _codex_backend([
+        {"stdout": ""}, {"stdout": ""},
+        {"stdout": CONFIRMED_SMOKE_JSONL,
+         "stderr": "note: fetching latest model catalogue\n"}])
+    assert backend.smoke_test("C:/ws") is True
+
+
+def test_codex_smoke_fails_on_timeout():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    verdict = evaluate_smoke_jsonl("", exit_code=None, timed_out=True)
+    assert verdict["ok"] is False and verdict["reason"] == "timeout"
+
+
+def test_codex_smoke_fails_on_nonzero_exit_code():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    verdict = evaluate_smoke_jsonl(CONFIRMED_SMOKE_JSONL, exit_code=1,
+                                   timed_out=False)
+    assert verdict["ok"] is False and "exit code" in verdict["reason"]
+
+
+def test_codex_smoke_fails_on_turn_failed_event():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "t1"}),
+        json.dumps({"type": "turn.failed", "error": "sandbox denied write"}),
+    ])
+    verdict = evaluate_smoke_jsonl(stdout, exit_code=0, timed_out=False)
+    assert verdict["ok"] is False
+    assert "sandbox denied write" in verdict["reason"]
+
+
+def test_codex_smoke_fails_on_error_event():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "t1"}),
+        json.dumps({"type": "error", "message": "not logged in"}),
+        json.dumps({"type": "item.completed",
+                    "item": {"type": "agent_message",
+                             "text": "CODEX_SMOKE_OK"}}),
+        json.dumps({"type": "turn.completed"}),
+    ])
+    verdict = evaluate_smoke_jsonl(stdout, exit_code=0, timed_out=False)
+    assert verdict["ok"] is False
+    assert "not logged in" in verdict["reason"]
+
+
+def test_codex_smoke_fails_on_missing_agent_message():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "t1"}),
+        json.dumps({"type": "turn.completed"}),
+    ])
+    verdict = evaluate_smoke_jsonl(stdout, exit_code=0, timed_out=False)
+    assert verdict["ok"] is False
+    assert "agent_message" in verdict["reason"]
+
+
+def test_codex_smoke_fails_on_missing_turn_completed():
+    from providers.cli_codex import evaluate_smoke_jsonl
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "t1"}),
+        json.dumps({"type": "item.completed",
+                    "item": {"type": "agent_message",
+                             "text": "CODEX_SMOKE_OK"}}),
+    ])
+    verdict = evaluate_smoke_jsonl(stdout, exit_code=0, timed_out=False)
+    assert verdict["ok"] is False
+    assert "turn.completed" in verdict["reason"]
+
+
+def test_codex_smoke_does_not_require_single_json_object():
+    """Multiple independent JSONL lines are expected -- the parser must not
+    assume the entire stdout is exactly one JSON document."""
+    from providers.cli_codex import evaluate_smoke_jsonl
+    assert len(CONFIRMED_SMOKE_JSONL.strip().splitlines()) > 1
+    verdict = evaluate_smoke_jsonl(CONFIRMED_SMOKE_JSONL, exit_code=0,
+                                   timed_out=False)
+    assert verdict["ok"] is True
+
+
+def test_codex_smoke_capability_detection_omits_unsupported_ignore_user_config():
+    """`--ignore-user-config` must be omitted, not blindly assumed, when
+    `codex --help` / `codex exec --help` show it isn't supported."""
+    backend = _codex_backend([
+        {"stdout": "codex [OPTIONS] <COMMAND>\n  -a, --ask-for-approval <MODE>\n"},
+        {"stdout": "codex exec [OPTIONS] [PROMPT]\n  --ephemeral\n  --json\n"
+                   "  --sandbox <MODE> [possible values: read-only, "
+                   "workspace-write, danger-full-access]\n"},
+        {"stdout": CONFIRMED_SMOKE_JSONL}])
+    ok = backend.smoke_test("C:/ws")
+    assert ok is True
+    smoke_argv = backend.runner.calls[-1]["argv"]
+    assert "--ignore-user-config" not in smoke_argv
+    assert smoke_argv[:4] == ["codex", "-a", "never", "exec"]
+
+
+def test_codex_smoke_capability_detection_uses_subcommand_when_global_unsupported():
+    """When `codex --help` shows no global approval flag but `codex exec
+    --help` does, fall back to the subcommand placement."""
+    backend = _codex_backend([
+        {"stdout": "codex [OPTIONS] <COMMAND>\n"},                    # no -a
+        {"stdout": "codex exec [OPTIONS] [PROMPT]\n"
+                   "  --ask-for-approval <MODE>\n"
+                   "  --ignore-user-config\n  --ephemeral\n  --json\n"},
+        {"stdout": CONFIRMED_SMOKE_JSONL}])
+    ok = backend.smoke_test("C:/ws")
+    assert ok is True
+    smoke_argv = backend.runner.calls[-1]["argv"]
+    assert smoke_argv[:2] == ["codex", "exec"]
+    assert smoke_argv[smoke_argv.index("--ask-for-approval") + 1] == "never"
+    assert "-a" not in smoke_argv
+
+
+def test_codex_smoke_records_diagnostics_for_doctor_and_setup():
+    backend = _codex_backend([
+        {"stdout": ""}, {"stdout": ""},
+        {"stdout": "", "exit_code": 1, "stderr": "not logged in"}])
+    ok = backend.smoke_test("C:/ws")
+    assert ok is False
+    assert backend.last_smoke["reason"].startswith("nonzero exit code")
+    assert backend.last_smoke["argv"][-1] == "<prompt redacted>"
+    assert "Reply with exactly" not in json.dumps(backend.last_smoke)
+
+
+def test_codex_smoke_never_calls_login_or_reads_credential_files():
+    backend = _codex_backend([
+        {"stdout": ""}, {"stdout": ""}, {"stdout": CONFIRMED_SMOKE_JSONL}])
+    backend.smoke_test("C:/ws")
+    for call in backend.runner.calls:
+        joined = " ".join(call["argv"]).lower()
+        assert "auth.json" not in joined
+        assert "login status" not in joined  # auth probe is a separate call
+
+
+def test_codex_auth_failure_classified_before_smoke_runs():
+    with pytest.raises(errors.AuthError):
+        classify_cli_failure("codex", 1, "Not logged in. Run codex login.")
 
 
 # 7. no access to cached authentication files ------------------------------------------
