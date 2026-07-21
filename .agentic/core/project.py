@@ -150,8 +150,10 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
                     schema=_schema("architect.schema.json"),
                     workspace=p["root"], permissions="read")
     if not result["ok"]:
-        return {"status": "architect_failed",
-                "error": (result.get("error") or {}).get("kind")}
+        err = result.get("error") or {}
+        return {"status": "architect_failed", "error": err.get("kind"),
+                "detail": err.get("detail"),
+                "diagnostic": err.get("diagnostic")}
     out = result["structured_output"]
     a = p["agentic"]
     projstate.write_text(a, "PROJECT.md",
@@ -338,6 +340,13 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     # guardrails are OS policy: always read from the platform install,
     # even when project state is redirected to the runtime home
     protected = gitops.load_protected_paths(cfg, str(config_mod.AGENTIC_DIR))
+    # Capability Plan (Phase 3) can narrow exactly two protected-path
+    # categories (Supabase migrations, Docker files) -- only once it has
+    # actually selected the capability that needs them; see Phase 0
+    # decision, capability-intelligence-design.md section 3.
+    capability_plan = projstate.read_yaml(a, "capability-plan.yaml", None)
+    authorised_exceptions = gitops.capability_authorised_exceptions(
+        capability_plan)
     try:   # restart recovery: surface abandoned task worktrees
         from . import taskspace as _ts
         abandoned = _ts.recover_abandoned(p["root"], a)
@@ -430,11 +439,18 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         return fail("failure", "conductor queued: %s" % order.get("queue_reason"),
                     block=True, blocking_reason=order.get("queue_reason"))
     for pattern in order.get("allowed_paths", []):
-        if gitops.matches_any(pattern, protected) or \
-                any(gitops.match_pattern(pp, pattern) for pp in protected):
+        if gitops.pattern_is_protected(pattern, protected,
+                                       authorised_exceptions):
             return fail("failure", "work order grants protected path %s"
                         % pattern, block=True,
                         blocking_reason="protected path in work order")
+
+    worker_role = _worker_role(task, order)
+    order = _enrich_work_order_safe(cfg, p, a, order, task, worker_role,
+                                    capability_plan, ledger, log, run_id)
+    with open(os.path.join(run_dir, "work-order.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(order, fh, indent=2)
 
     # file-ownership claim + isolated per-task worktree ------------------------
     from . import taskspace
@@ -458,7 +474,6 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     max_det_attempts = int(repair_cfg.get("maximum_attempts_per_task", 3))
     max_review_rounds = int((cfg.get("cycle") or {}).get(
         "maximum_review_rounds", repair_cfg.get("maximum_review_rounds", 2)))
-    worker_role = _worker_role(task, order)
     gate_result = None
     qa_out = None
     det_attempts = 0
@@ -506,7 +521,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                         block=True, blocking_reason=result.get("blocker"))
 
         violations = _apply_and_check_paths(cfg, result, order, worktree,
-                                            protected)
+                                            protected, authorised_exceptions)
         if violations:
             det_attempts += 1
             log({"event": "scope_violation", "run_id": run_id,
@@ -649,6 +664,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     taskspace.cleanup_task_worktree(p["root"], a, task["id"], success=True)
     _index_project(cfg, project_worktree, p["memory"], log, full=False,
                    changed=changed)
+    _record_capability_evidence_safe(a, order, task, gate_result, log,
+                                     run_id)
     projstate.update_task(a, task["id"], status="done",
                           attempts=task["attempts"] + 1, last_result="pass",
                           blocking_reason=None)
@@ -679,6 +696,106 @@ def _worker_role(task, order):
     if any(hint in paths for hint in UI_PATH_HINTS):
         return "ui_designer"
     return "coder"
+
+
+def _enrich_work_order_safe(cfg, p, a, order, task, worker_role,
+                            capability_plan, ledger, log, run_id):
+    """Best-effort Capability-Aware Planning (Phase 10): attaches
+    required_capabilities/selected_skills/selected_mcp_tools/
+    selected_agent_role/selected_backend/selected_model/
+    evidence_requirements/protected_actions to the work order the coder
+    receives. A project with no Capability Plan/Graph yet is completely
+    unaffected -- and any failure in this NEW machinery is swallowed
+    here so it can never break the existing, working cycle loop."""
+    if not capability_plan:
+        return order
+    try:
+        from .capability import load_taxonomy
+        from .capability.graph import load_graph
+        from .capability.predispatch import confirm_ready_for_dispatch
+        from .capability.workorder import enrich_work_order
+        from . import config as config_mod
+        taxonomy = load_taxonomy(strict=False)
+        graph = load_graph(a)
+        model_registry = None
+        try:
+            from .modelcap import load_registry
+            model_registry = load_registry(p["memory"])
+        except Exception:   # noqa: BLE001
+            model_registry = None
+        enriched = enrich_work_order(
+            order, task, graph=graph, taxonomy=taxonomy,
+            capability_plan=capability_plan, role=worker_role,
+            model_registry=model_registry, ledger=ledger, cfg=cfg)
+        protected = gitops.load_protected_paths(cfg,
+                                                str(config_mod.AGENTIC_DIR))
+        authorised_exceptions = gitops.capability_authorised_exceptions(
+            capability_plan)
+        ok, warnings = confirm_ready_for_dispatch(
+            enriched, graph=graph, model_registry=model_registry,
+            protected=protected, authorised_exceptions=authorised_exceptions)
+        if not ok:
+            log({"event": "predispatch_warnings", "run_id": run_id,
+                 "task_id": task.get("id"), "warnings": warnings[:10]})
+        return enriched
+    except Exception as exc:   # noqa: BLE001
+        log({"event": "capability_enrichment_failed", "run_id": run_id,
+             "task_id": task.get("id"), "detail": str(exc)[:300]})
+        return order
+
+
+def _record_capability_evidence_safe(a, order, task, gate_result, log,
+                                     run_id):
+    """Best-effort Capability Graph evidence recording (Phase 10) after a
+    task's deterministic checks have already passed. Reuses the
+    already-computed `gate_result` as verified evidence -- never a
+    model's own claim -- and never able to affect the cycle's outcome:
+    any failure here is swallowed and logged."""
+    required_ids = order.get("required_capabilities") or []
+    if not required_ids:
+        return
+    try:
+        from .capability.graph import load_graph, save_graph
+        from .capability.workorder import record_capability_evidence
+        graph = load_graph(a)
+        if graph is None:
+            return
+        recorded = record_capability_evidence(
+            graph, required_ids, task_id=task.get("id"),
+            gate_ok=bool(gate_result and gate_result.get("ok")))
+        if recorded:
+            save_graph(a, graph)
+            log({"event": "capability_evidence_recorded", "run_id": run_id,
+                 "task_id": task.get("id"), "capabilities": recorded})
+    except Exception as exc:   # noqa: BLE001
+        log({"event": "capability_evidence_failed", "run_id": run_id,
+             "task_id": task.get("id"), "detail": str(exc)[:300]})
+
+
+_EMPTY_COMPLETION_CONTRACT = {"requirements": [], "unverified": [],
+                              "verified_count": 0, "total_count": 0,
+                              "complete": True}
+
+
+def _build_completion_contract_safe(a, requirements_map, log):
+    """Best-effort Completion Contract / Evidence Matrix (Phase 11): a
+    project with no requirements_map (or any failure assembling one)
+    gets the trivially-complete empty contract -- this must never be
+    able to turn an otherwise-complete project into a stuck one, and
+    must never fabricate evidence that doesn't exist."""
+    if not requirements_map:
+        return dict(_EMPTY_COMPLETION_CONTRACT)
+    try:
+        from . import completion
+        from .capability.graph import load_graph
+        backlog = projstate.load_backlog(a)
+        graph = load_graph(a)
+        return completion.build_completion_contract(requirements_map,
+                                                     backlog, graph=graph)
+    except Exception as exc:   # noqa: BLE001
+        log({"event": "completion_contract_failed",
+             "detail": str(exc)[:300]})
+        return dict(_EMPTY_COMPLETION_CONTRACT)
 
 
 def _failure_fingerprint(failing, worktree):
@@ -720,18 +837,21 @@ def _invoke_coder(cfg, caller, coder_input, worktree, chain, role="coder"):
     return result
 
 
-def _apply_and_check_paths(cfg, result, order, worktree, protected):
+def _apply_and_check_paths(cfg, result, order, worktree, protected,
+                           authorised_exceptions=None):
     if result.get("edits") is not None:
         violations = apply_edits(worktree, result["edits"],
                                  order["allowed_paths"],
-                                 order.get("forbidden_paths", []), protected)
+                                 order.get("forbidden_paths", []), protected,
+                                 authorised_exceptions=authorised_exceptions)
     else:
         violations = []
     gitops.stage_all(worktree)
     files = gitops.changed_files(worktree)
     violations += gitops.check_paths(files, order["allowed_paths"],
                                      order.get("forbidden_paths", []),
-                                     protected)
+                                     protected,
+                                     authorised_exceptions=authorised_exceptions)
     lines = gitops.changed_lines(worktree)
     limit = min(int(order.get("maximum_changed_lines") or 0) or 10 ** 9,
                 int(cfg.get("execution", {}).get("max_changed_lines", 400)))
@@ -856,6 +976,9 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     checks["env_example_present"] = (
         not _needs_env(worktree) or
         os.path.exists(os.path.join(worktree, ".env.example")))
+    completion_contract = _build_completion_contract_safe(
+        a, criteria.get("requirements_map", []), log)
+    checks["completion_contract_verified"] = completion_contract["complete"]
     review = None
     if all(checks.values()) and caller is not None:
         # the final auditor gets its own routing chain when the capability
@@ -899,6 +1022,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
              "complete": complete, "checks": checks,
              "final_review": review,
              "completion_criteria": criteria.get("completion_criteria", []),
+             "completion_contract": completion_contract,
              "branch": PROJECT_BRANCH}
     projstate.write_yaml(a, "final-audit.yaml", audit)
     from .knowledge import update_knowledge

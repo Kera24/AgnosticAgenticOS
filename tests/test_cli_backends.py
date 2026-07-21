@@ -120,6 +120,106 @@ def test_codex_command_construction_never_leaks_unrelated_backend_config():
     assert argv[argv.index("--model") + 1] == "gpt-5-codex"
 
 
+# -- central model resolution: Codex CLI ---------------------------------------------
+@pytest.mark.parametrize("configured_model", [
+    None,                       # 1. missing
+    "auto",                     # 2. auto
+    "example-reasoning-model",  # 3. placeholder role-style name (conductor)
+    "example-coding-model",     # 4. placeholder role-style name (worker)
+    "example/small-triage-model",
+    "",
+])
+def test_codex_omits_model_flag_for_placeholder_or_missing(configured_model):
+    cfg = {"model": configured_model} if configured_model is not None else {}
+    backend = CodexCLIBackend("codex", cfg, runner=FakeRunner([]),
+                              which=lambda b: "x")
+    argv = backend.build_argv("architect", "read", "C:/ws")
+    assert "--model" not in argv
+    assert backend.last_model_resolution["resolved_model"] == "provider_default"
+    assert backend.last_model_resolution["model_source"] == \
+        "cli_provider_default"
+    assert backend.last_model_resolution["model_flag_emitted"] is False
+    assert backend.last_model_resolution["valid"] is True
+
+
+def test_codex_includes_model_flag_for_explicit_valid_model():
+    # 5. explicit valid configured model -> included
+    backend = CodexCLIBackend("codex", {"model": "gpt-5-codex"},
+                              runner=FakeRunner([]), which=lambda b: "x")
+    argv = backend.build_argv("architect", "read", "C:/ws")
+    assert argv[argv.index("--model") + 1] == "gpt-5-codex"
+    assert backend.last_model_resolution["model_source"] == "explicit_config"
+    assert backend.last_model_resolution["model_flag_emitted"] is True
+
+
+def test_codex_architect_role_resolves_provider_default_and_succeeds():
+    """#13: the architect role -- the exact role project_start() calls --
+    with a placeholder backend model still succeeds via provider default,
+    matching the confirmed-good manual smoke invocation shape."""
+    runner = FakeRunner([{"stdout": CODEX_JSONL}])
+    backend = CodexCLIBackend("codex", {"model": "example-reasoning-model"},
+                              runner=runner, which=lambda b: "x")
+    result = backend.invoke("architect", "plan this", None, "C:/ws", "read",
+                            300)
+    assert result["ok"]
+    argv = runner.calls[0]["argv"]
+    assert "--model" not in argv
+    assert argv[:4] == ["codex", "-a", "never", "exec"]
+
+
+# -- central model resolution: Claude CLI (via ConfiguredCLIBackend) -----------------
+@pytest.mark.parametrize("configured_model", [
+    None, "auto", "example-reasoning-model",
+])
+def test_claude_cli_omits_model_flag_for_placeholder_or_auto(configured_model):
+    # 6/7
+    cfg = dict(CLAUDE_CFG)
+    if configured_model is not None:
+        cfg["model"] = configured_model
+    runner = FakeRunner([{"stdout": json.dumps(
+        {"result": "did the thing", "model": "claude-default"})}])
+    backend = ConfiguredCLIBackend("claude", cfg, runner=runner,
+                                   which=lambda b: "x")
+    result = backend.invoke("coder", "prompt", None, "C:/ws", "write", 60)
+    assert result["ok"]
+    argv = runner.calls[0]["argv"]
+    assert "--model" not in argv
+    assert backend.last_model_resolution["model_flag_emitted"] is False
+
+
+def test_claude_cli_includes_model_flag_for_explicit_valid_model():
+    cfg = dict(CLAUDE_CFG, model="claude-opus-4-8")
+    runner = FakeRunner([{"stdout": json.dumps({"result": "ok"})}])
+    backend = ConfiguredCLIBackend("claude", cfg, runner=runner,
+                                   which=lambda b: "x")
+    backend.invoke("coder", "prompt", None, "C:/ws", "write", 60)
+    argv = runner.calls[0]["argv"]
+    assert argv[argv.index("--model") + 1] == "claude-opus-4-8"
+
+
+def test_codex_worker_and_verifier_roles_resolve_provider_default():
+    """#14/#15: worker and verifier roles behave identically to architect
+    under the same central resolver -- no role-specific special-casing."""
+    for role in ("worker", "verifier"):
+        runner = FakeRunner([{"stdout": CODEX_JSONL}])
+        backend = CodexCLIBackend(
+            "codex", {"model": "example-verification-model"}, runner=runner,
+            which=lambda b: "x")
+        result = backend.invoke(role, "do it", None, "C:/ws", "read", 300)
+        assert result["ok"], role
+        assert "--model" not in runner.calls[0]["argv"]
+
+
+def test_codex_final_auditor_role_resolves_provider_default():
+    """#16: the final-audit call reuses the "qa" role end to end."""
+    runner = FakeRunner([{"stdout": CODEX_JSONL}])
+    backend = CodexCLIBackend("codex", {"model": "example-verification-model"},
+                              runner=runner, which=lambda b: "x")
+    result = backend.invoke("qa", "final audit", None, "C:/ws", "read", 300)
+    assert result["ok"]
+    assert "--model" not in runner.calls[0]["argv"]
+
+
 def test_codex_invoke_parses_jsonl_and_usage():
     runner = FakeRunner([{"stdout": CODEX_JSONL}])
     backend = CodexCLIBackend("codex", {}, runner=runner, which=lambda b: "x")
@@ -460,20 +560,91 @@ def test_ollama_detection_and_model_discovery():
                          which=lambda b: None)["installed"] is False
 
 
+def _ollama_list_runner(models):
+    """FakeRunner scripted for detect_ollama()'s two calls: --version, list."""
+    header = "NAME  ID  SIZE\n"
+    rows = "\n".join("%s  x  1GB" % m for m in models)
+    return FakeRunner([{"stdout": "ollama version 0.5.7"},
+                       {"stdout": header + rows}])
+
+
 def test_ollama_backend_requires_selected_model():
-    backend = OllamaLocalBackend("ollama", {}, transport=Transport([]))
+    backend = OllamaLocalBackend(
+        "ollama", {}, transport=Transport([]),
+        runner=_ollama_list_runner([]), which=lambda b: "C:/bin/ollama")
     with pytest.raises(errors.ModelUnavailableError):
         backend.invoke("coder", "x", None, ".", "write", 30)
 
 
 def test_ollama_backend_invokes_local_model():
     transport = Transport([(200, oai_body("local says hi"))])
-    backend = OllamaLocalBackend("ollama", {"model": "llama3:8b"},
-                                 transport=transport)
+    backend = OllamaLocalBackend(
+        "ollama", {"model": "llama3:8b"}, transport=transport,
+        runner=_ollama_list_runner(["llama3:8b", "qwen3.5:latest"]),
+        which=lambda b: "C:/bin/ollama")
     result = backend.invoke("coder", "x", None, ".", "write", 30)
     assert result["ok"] and result["backend_type"] == "local"
     assert result["estimated_cost_usd"] == 0.0
     assert transport.calls[0]["url"].startswith("http://localhost:11434")
+
+
+# -- central model resolution: Ollama ----------------------------------------------------
+def test_ollama_selected_qwen_model_is_used():
+    """#8: the configured, installed model is sent to the HTTP endpoint
+    unchanged -- this is the exact machine setup from the confirmed bug
+    report (routing fallback: ollama, selected model qwen3.5:latest)."""
+    transport = Transport([(200, oai_body("hello from qwen"))])
+    backend = OllamaLocalBackend(
+        "ollama", {"model": "qwen3.5:latest"}, transport=transport,
+        runner=_ollama_list_runner(["qwen3.5:latest", "llama3:8b"]),
+        which=lambda b: "C:/bin/ollama")
+    result = backend.invoke("architect", "x", None, ".", "read", 30)
+    assert result["ok"]
+    assert backend.last_model_resolution["resolved_model"] == "qwen3.5:latest"
+    assert backend.last_model_resolution["model_flag_emitted"] is True
+    assert transport.calls[0]["body"].get("model") == "qwen3.5:latest"
+
+
+def test_ollama_rejects_embedding_only_model():
+    """#9: an embedding-only model is never selected, even if explicitly
+    configured -- e.g. nomic-embed-text-v2-moe:latest."""
+    backend = OllamaLocalBackend(
+        "ollama", {"model": "nomic-embed-text-v2-moe:latest"},
+        transport=Transport([]),
+        runner=_ollama_list_runner(["nomic-embed-text-v2-moe:latest"]),
+        which=lambda b: "C:/bin/ollama")
+    with pytest.raises(errors.ModelUnavailableError) as exc:
+        backend.invoke("coder", "x", None, ".", "write", 30)
+    assert "embedding" in str(exc.value).lower()
+    assert backend.last_model_resolution["valid"] is False
+
+
+def test_ollama_rejects_missing_generation_model():
+    """#10: only an embedding model is installed -- no generation model
+    exists, so resolution must fail with a clear pre-invocation error."""
+    backend = OllamaLocalBackend(
+        "ollama", {}, transport=Transport([]),
+        runner=_ollama_list_runner(["nomic-embed-text-v2-moe:latest"]),
+        which=lambda b: "C:/bin/ollama")
+    with pytest.raises(errors.ModelUnavailableError) as exc:
+        backend.invoke("coder", "x", None, ".", "write", 30)
+    assert "no installed generation model" in str(exc.value).lower() or \
+        "no model configured" in str(exc.value).lower()
+
+
+def test_ollama_typo_model_rejected_before_http_call():
+    """The confirmed bug: a typo'd configured model (qwew3.5:latest vs
+    qwen3.5:latest) must be caught by pre-invocation validation against
+    `ollama list`, not surface as a live HTTP model_unavailable."""
+    transport = Transport([(200, oai_body("should never be called"))])
+    backend = OllamaLocalBackend(
+        "ollama", {"model": "qwew3.5:latest"}, transport=transport,
+        runner=_ollama_list_runner(["qwen3.5:latest"]),
+        which=lambda b: "C:/bin/ollama")
+    with pytest.raises(errors.ModelUnavailableError) as exc:
+        backend.invoke("architect", "x", None, ".", "read", 30)
+    assert "qwew3.5:latest" in str(exc.value)
+    assert transport.calls == []   # never reached the HTTP layer
 
 
 # 11. existing API adapter preservation ------------------------------------------------------
@@ -495,3 +666,30 @@ def test_api_backends_preserved_through_common_interface(base_cfg):
     resp = invoke_model(base_cfg, "triage", "x", budget=budget,
                         transport=Transport([(200, oai_body("legacy ok"))]))
     assert resp["ok"] and resp["content"] == "legacy ok"
+
+
+# -- central model resolution: API backends must never accept placeholders ------------
+def test_api_backend_rejects_placeholder_model(base_cfg):
+    # 11
+    from core.backends import build_backend
+    base_cfg["backends"] = {"mock_api": {"type": "api", "provider": "mock",
+                                         "model": "example-reasoning-model"}}
+    transport = Transport([(200, oai_body("should never be called"))])
+    backend = build_backend(base_cfg, "mock_api", transport=transport)
+    with pytest.raises(errors.ModelUnavailableError) as exc:
+        backend.invoke("qa", "ping", None, ".", "read", 30)
+    assert "explicit" in str(exc.value).lower()
+    assert transport.calls == []   # never reached the HTTP layer
+
+
+def test_api_backend_accepts_explicit_valid_model(base_cfg):
+    # 12
+    from core.backends import build_backend
+    base_cfg["backends"] = {"mock_api": {"type": "api", "provider": "mock",
+                                         "model": "mock-large-v1"}}
+    transport = Transport([(200, oai_body("api alive"))])
+    backend = build_backend(base_cfg, "mock_api", transport=transport)
+    result = backend.invoke("qa", "ping", None, ".", "read", 30)
+    assert result["ok"] and result["content"] == "api alive"
+    assert backend.last_model_resolution["valid"] is True
+    assert backend.last_model_resolution["model_source"] == "explicit_config"

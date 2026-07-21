@@ -10,10 +10,17 @@ class AgenticError(Exception):
         self.detail = str(detail)
         self.provider = provider
         self.model = model
+        # Optional model-resolution diagnostic (role/backend/configured
+        # model/resolved model/source/flag-emitted) -- see core.modelres.
+        # Never carries prompts or credentials.
+        self.diagnostic = None
 
     def as_dict(self):
-        return {"kind": self.kind, "detail": self.detail,
-                "provider": self.provider, "model": self.model}
+        out = {"kind": self.kind, "detail": self.detail,
+               "provider": self.provider, "model": self.model}
+        if self.diagnostic:
+            out["diagnostic"] = self.diagnostic
+        return out
 
 
 class AuthError(AgenticError):

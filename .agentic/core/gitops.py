@@ -121,13 +121,53 @@ def load_protected_paths(cfg, agentic_dir):
     return patterns
 
 
-def check_paths(paths, allowed, forbidden, protected):
+# A fixed, reviewed allowlist -- never a generic "the plan says so" escape
+# hatch. A Capability Plan can only narrow these two specific categories,
+# and only once it has actually selected the capability that needs them
+# (Phase 0 decision: option 1 -- see capability-intelligence-design.md
+# section 3). Every other protected pattern (.env*, secrets, auth,
+# payments, workflows, ...) is never authorisable this way.
+_CAPABILITY_PATH_EXCEPTIONS = (
+    ("supabase/migrations/**", ("supabase", "database_migrations")),
+    ("Dockerfile", ("docker",)),
+    ("docker-compose.yml", ("docker",)),
+    ("docker-compose.yaml", ("docker",)),
+)
+
+
+def capability_authorised_exceptions(capability_plan):
+    """Concrete path globs a project's own CapabilityPlan (Phase 3)
+    authorises, narrowing -- never widening -- the protected-paths list.
+    Returns [] for no plan (default: nothing is authorised)."""
+    if not capability_plan:
+        return []
+    selected = {r.get("capability_id") for r in
+               (capability_plan.get("required_capabilities") or [])
+               + (capability_plan.get("optional_capabilities") or [])}
+    return [pattern for pattern, needs in _CAPABILITY_PATH_EXCEPTIONS
+           if selected & set(needs)]
+
+
+def pattern_is_protected(pattern, protected, authorised_exceptions=None):
+    """True if `pattern` (typically a work-order `allowed_paths` glob)
+    would grant access to a protected path, unless it is fully covered
+    by an authorised exception."""
+    hits = matches_any(pattern, protected) or \
+        any(match_pattern(pp, pattern) for pp in protected)
+    if not hits:
+        return False
+    return not matches_any(pattern, authorised_exceptions or [])
+
+
+def check_paths(paths, allowed, forbidden, protected,
+                authorised_exceptions=None):
     """Return list of violation strings; empty means compliant. An empty
     allowed list rejects everything (deny by default)."""
     violations = []
     for path in paths:
         p = _norm(path)
-        if matches_any(p, protected):
+        if matches_any(p, protected) and \
+                not matches_any(p, authorised_exceptions or []):
             violations.append("protected path touched: %s" % p)
         elif matches_any(p, forbidden):
             violations.append("forbidden path touched: %s" % p)

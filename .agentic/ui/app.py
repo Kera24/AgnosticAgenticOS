@@ -604,6 +604,19 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         audit("ui_mcp_action", server=server_id[:64], action=action)
         return result
 
+    @app.get(API + "/portfolio/{project_id}/capability")
+    def capability_view(project_id: str):
+        try:
+            return portfolio_mod.capability_snapshot(cfg(), project_id[:64])
+        except RegistryError as exc:
+            raise HTTPException(404, str(exc.detail
+                                         if hasattr(exc, "detail")
+                                         else exc))
+
+    @app.get(API + "/orchestration")
+    def orchestration_view():
+        return portfolio_mod.orchestration_snapshot(cfg())
+
     @app.get(API + "/skills/market")
     def skills_market():
         return portfolio_mod.market_snapshot(cfg())

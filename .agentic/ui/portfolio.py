@@ -136,9 +136,9 @@ def add_project(cfg, name, root, plan="plan.md", create=False):
     if create:
         plan_path = os.path.join(record["root_path"], record["plan_path"])
         if not os.path.exists(plan_path):
+            from core.projectspec import render_template
             with open(plan_path, "w", encoding="utf-8") as fh:
-                fh.write("# %s\n\nDescribe the application to build "
-                         "here.\n" % record["name"])
+                fh.write(render_template(name=record["name"]))
     return record
 
 
@@ -188,3 +188,65 @@ def market_action(cfg, skill_id, action):
     if action not in actions:
         raise ValueError("unsupported action %r" % action)
     return actions[action](skill_id)
+
+
+def capability_snapshot(cfg, project_id):
+    """Read-only capability-intelligence view for one project (Phase 12):
+    Capability Plan summary, Capability Graph satisfaction breakdown, the
+    pending setup-actions autonomy inbox, and the Completion Contract
+    from the most recent final audit. A project that hasn't run
+    `capability plan`/`project start` yet gets None/empty fields --
+    never fabricated."""
+    registry = _registry()
+    record = registry.get(project_id)
+    plan = projectops.load_capability_plan(registry, project_id)
+    graph = projectops.load_capability_graph(registry, project_id)
+    graph_summary = None
+    if graph is not None:
+        by_state = {}
+        for node in graph.nodes_of_type("capability").values():
+            state = node["attributes"]["state"]
+            by_state[state] = by_state.get(state, 0) + 1
+        graph_summary = {
+            "capability_count": len(graph.nodes_of_type("capability")),
+            "by_state": by_state,
+            "unresolved": graph.unresolved_capabilities(),
+        }
+    setup_actions = projectops.list_project_setup_actions(
+        registry, project_id, status="pending")
+    proj_cfg = projectops.project_cfg_for(cfg, registry, record)
+    runtime_dir = proj_cfg["runtime"]["project_dir"]
+    audit = projstate.read_yaml(runtime_dir, "final-audit.yaml", None)
+    plan_summary = None
+    if plan is not None:
+        plan_summary = {
+            "confidence": plan.get("confidence"),
+            "required_capabilities": [r["capability_id"] for r in
+                                      plan.get("required_capabilities", [])],
+            "optional_capabilities": [r["capability_id"] for r in
+                                      plan.get("optional_capabilities", [])],
+            "protected_actions": plan.get("protected_actions", []),
+            "unresolved_questions": plan.get("unresolved_questions", []),
+        }
+    return {"project_id": project_id, "plan_summary": plan_summary,
+           "graph_summary": graph_summary, "setup_actions": setup_actions,
+           "completion_contract": (audit or {}).get("completion_contract")}
+
+
+def orchestration_snapshot(cfg):
+    """Read-only Model Capability Registry + frontier-capacity view
+    (Phase 12) -- the persisted snapshot only (`models refresh`/`doctor`
+    populate it); a dashboard read never triggers live model discovery."""
+    from core.capacity import CapacityLedger
+    from core.hierarchy import frontier_capacity_status
+    from core.modelcap import load_registry
+    memory_dir = str(config_mod.AGENTIC_DIR / "memory")
+    registry = load_registry(memory_dir)
+    capacity = None
+    if registry is not None:
+        ledger = CapacityLedger(cfg, memory_dir)
+        status, detail = frontier_capacity_status(cfg, ledger, registry)
+        capacity = dict(detail, status=status)
+    return {"generated_at": registry.generated_at if registry else None,
+           "records": registry.records if registry else [],
+           "frontier_capacity": capacity}

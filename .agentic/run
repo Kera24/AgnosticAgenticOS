@@ -21,6 +21,16 @@ Multi-project registry (external application folders):
   python .agentic/run project adopt-legacy
   (bin\agentic.cmd wraps this entry point: `agentic project list`)
 
+Canonical project.md (Capability Intelligence, Phase 1):
+  python .agentic/run project template [--name "App"] > project.md
+  python .agentic/run project validate|assumptions|specification <id>
+
+Requirements Intelligence Engine + Graph + Resolver (Phase 3/4/5):
+  python .agentic/run capability analyse|plan|refresh <id>
+  python .agentic/run capability explain <id> <capability-id>
+  python .agentic/run capability graph|resolve|status <id>
+  python .agentic/run capability candidates|retry <id> <capability-id>
+
 Full-project build:
   python .agentic/run setup             interactive machine configuration
   python .agentic/run project-start plan.md
@@ -49,10 +59,30 @@ Memory (progressive disclosure):
 Knowledge vault (Obsidian-compatible):
   python .agentic/run knowledge status|rebuild|validate|open
 
-Skills (pinned, reviewed, never auto-installed):
+Skills (pinned, reviewed; low-risk candidates auto-approved by policy --
+never by a model -- see Phase 6):
   python .agentic/run skills list|inspect|verify|enable|disable|remove
   python .agentic/run skills add <source-dir> --revision <commit>
   python .agentic/run skills recommend <task-id>
+  python .agentic/run skills discover|quarantine|evaluate|approve|reject
+  python .agentic/run skills rollback|compare|check-updates <id>
+  python .agentic/run skills policy
+  python .agentic/run skills discover-for-project <project-id>
+  python .agentic/run skills evaluation|provenance <skill-id>
+
+MCP servers + plugins (project-scoped, tool-allowlisted; Phase 7):
+  python .agentic/run mcp list|add|show|authenticate|test|tools
+  python .agentic/run mcp enable|disable|remove|review <id>
+  python .agentic/run mcp setup-actions <project-id>
+  python .agentic/run mcp resolve-setup-action <project-id> <action-id>
+  python .agentic/run plugin decompose|evaluate <directory>
+
+Model Capability Registry + Hierarchical Orchestration (Phase 8/9):
+  python .agentic/run models list|refresh
+  python .agentic/run models resolve <alias>
+    (e.g. orchestrator_frontier, coder_medium, reviewer_high, local_fallback)
+  python .agentic/run models select <role> [risk]   explainable routing
+  python .agentic/run models capacity               frontier reserve status
 
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
@@ -351,12 +381,16 @@ def cmd_project(cfg, args):
                 plan_path = os.path.join(record["root_path"],
                                          record["plan_path"])
                 if not os.path.exists(plan_path):
+                    from core.projectspec import render_template
                     with open(plan_path, "w", encoding="utf-8") as fh:
-                        fh.write("# %s\n\nDescribe the application to "
-                                 "build here.\n" % record["name"])
+                        fh.write(render_template(name=record["name"]))
                 _print(projectops.project_init(cfg, registry, record["id"]))
             _print(registry.get(record["id"]))
             print("\nnext: py .agentic/run project init %s" % record["id"])
+            return 0
+        if sub == "template":
+            from core.projectspec import render_template
+            print(render_template(name=args.name or "My Project"))
             return 0
         if sub == "adopt-legacy":
             _print(projectops.adopt_legacy(
@@ -371,6 +405,48 @@ def cmd_project(cfg, args):
             return 0
         record = projectops.resolve_project(registry, ident)
         pid = record["id"]
+        if sub == "specification":
+            spec = projectops.load_specification(record)
+            if spec is None:
+                print("no plan file found for project %s" % pid,
+                     file=sys.stderr)
+                return 1
+            _print(spec)
+            return 0
+        if sub == "assumptions":
+            spec = projectops.load_specification(record)
+            if spec is None:
+                print("no plan file found for project %s" % pid,
+                     file=sys.stderr)
+                return 1
+            for a in spec["assumptions"]:
+                print("[%s] %s: %s (%s)" % (a["classification"],
+                                            a["section"], a["value"],
+                                            a["reason"]))
+            if spec["blocking_questions"]:
+                print("\nblocking questions (materially blocking):")
+                for q in spec["blocking_questions"]:
+                    print("  %s: %s" % (q["section"], q["question"]))
+            return 0
+        if sub == "validate":
+            spec = projectops.load_specification(record)
+            if spec is None:
+                print("no plan file found for project %s" % pid,
+                     file=sys.stderr)
+                return 1
+            from core.schema import load_schema, validate
+            schema = load_schema(str(AGENTIC_DIR /
+                                     "schemas" / "project-specification.schema.json"))
+            violations = validate(spec, schema)
+            for v in violations:
+                print("[error] %s" % v)
+            for w in spec["warnings"]:
+                print("[warn] %s" % w)
+            for q in spec["blocking_questions"]:
+                print("[blocking] %s: %s" % (q["section"], q["question"]))
+            ok = not violations and not spec["blocking_questions"]
+            print("\nspecification %s" % ("OK" if ok else "NOT READY"))
+            return 0 if ok else 1
         if sub == "show":
             _print(projectops.project_status(cfg, registry, pid))
             return 0
@@ -454,6 +530,126 @@ def cmd_project(cfg, args):
     return 2
 
 
+def cmd_capability(cfg, args):
+    """capability analyse|plan|explain|refresh|graph|resolve|status|
+    candidates|retry <project-id> [<capability-id>]
+
+    Requirements Intelligence Engine (Phase 3) + Capability Graph
+    (Phase 4) + Autonomous Resolver (Phase 5). `analyse` previews the
+    CapabilityPlan without saving it; `plan`/`refresh` save the plan AND
+    rebuild+save the graph. `resolve` searches installed skills/MCP
+    tools/deterministic tools for every unresolved capability and
+    acquires safe candidates (no network by default -- Phase 6/7 add the
+    external-registry hook). `status` shows current satisfaction state
+    per capability; `candidates` previews ranked candidates for one
+    capability without acquiring; `retry` re-attempts one capability."""
+    from core import projectops
+    from core.registry import ProjectRegistry, RegistryError
+    registry = ProjectRegistry()
+    sub = args.plan or "analyse"
+    extra = args.extra or []
+    if not extra:
+        print("usage: capability %s <project-id> [<capability-id>]" % sub,
+             file=sys.stderr)
+        return 2
+    try:
+        record = projectops.resolve_project(registry, extra[0])
+    except RegistryError as exc:
+        print("project error: %s"
+             % (exc.detail if hasattr(exc, "detail") else exc),
+             file=sys.stderr)
+        return 1
+    pid = record["id"]
+    if sub in ("analyse", "plan", "refresh"):
+        plan_result = projectops.analyse_capabilities(registry, record)
+        if plan_result is None:
+            print("no plan file found for project %s" % pid, file=sys.stderr)
+            return 1
+        if sub in ("plan", "refresh"):
+            projectops.save_capability_plan(registry, pid, plan_result)
+            graph = projectops.build_capability_graph(registry, record,
+                                                       plan=plan_result)
+            projectops.save_capability_graph(registry, pid, graph)
+        _print(plan_result)
+        return 0
+    if sub == "graph":
+        graph = projectops.load_capability_graph(registry, pid) or \
+            projectops.build_capability_graph(registry, record)
+        if graph is None:
+            print("no plan file found for project %s" % pid, file=sys.stderr)
+            return 1
+        unresolved = graph.unresolved_capabilities()
+        result = graph.to_dict()
+        result["unresolved_capabilities"] = unresolved
+        _print(result)
+        return 0
+    if sub == "explain":
+        if len(extra) < 2:
+            print("usage: capability explain <project-id> <capability-id>",
+                 file=sys.stderr)
+            return 2
+        capability_id = extra[1]
+        plan_result = projectops.load_capability_plan(registry, pid) or \
+            projectops.analyse_capabilities(registry, record)
+        if plan_result is None:
+            print("no plan file found for project %s" % pid, file=sys.stderr)
+            return 1
+        all_records = (plan_result["required_capabilities"] +
+                      plan_result["optional_capabilities"])
+        match = next((r for r in all_records
+                     if r["capability_id"] == capability_id), None)
+        if match is None:
+            print("capability %r not in the current plan for %s"
+                 % (capability_id, pid), file=sys.stderr)
+            return 1
+        _print(match)
+        return 0
+    if sub == "resolve":
+        result = projectops.resolve_capabilities(cfg, registry, record)
+        if result is None:
+            print("no plan file found for project %s" % pid, file=sys.stderr)
+            return 1
+        _print(result["summary"])
+        if result["summary"]["escalations"]:
+            print("\n%d mandatory capability escalation(s) -- see the "
+                 "autonomy inbox" % len(result["summary"]["escalations"]),
+                 file=sys.stderr)
+        return 0
+    if sub == "status":
+        graph = projectops.load_capability_graph(registry, pid) or \
+            projectops.build_capability_graph(registry, record)
+        if graph is None:
+            print("no plan file found for project %s" % pid, file=sys.stderr)
+            return 1
+        _print({cid: node["attributes"]["state"]
+               for cid, node in graph.nodes_of_type("capability").items()})
+        return 0
+    if sub == "candidates":
+        if len(extra) < 2:
+            print("usage: capability candidates <project-id> "
+                 "<capability-id>", file=sys.stderr)
+            return 2
+        _print(projectops.preview_capability_candidates(
+            cfg, registry, record, extra[1]))
+        return 0
+    if sub == "retry":
+        if len(extra) < 2:
+            print("usage: capability retry <project-id> <capability-id>",
+                 file=sys.stderr)
+            return 2
+        decision = projectops.retry_capability(cfg, registry, record,
+                                               extra[1])
+        if decision is None:
+            print("no plan file found for project %s" % pid, file=sys.stderr)
+            return 1
+        _print(decision)
+        return 0
+    print("usage: capability analyse|plan|explain|refresh|graph|resolve|"
+         "status|candidates|retry <project-id> [<capability-id>]",
+         file=sys.stderr)
+    return 2
+
+
 def cmd_mcp(cfg, args):
     """mcp list|add|show|authenticate|test|tools|enable|disable|remove|
     review"""
@@ -484,6 +680,27 @@ def cmd_mcp(cfg, args):
             _print(record)
             print("added DISABLED and UNREVIEWED; `mcp review` then "
                   "`mcp enable` after inspection")
+            return 0
+        # -- autonomy inbox: one-time setup actions (Phase 7) ---------------
+        if sub in ("setup-actions", "resolve-setup-action"):
+            from core import projectops
+            from core.registry import ProjectRegistry as _PReg
+            preg = _PReg()
+            if not extra:
+                print("usage: mcp %s <project-id> [<action-id>]" % sub,
+                     file=sys.stderr)
+                return 2
+            precord = projectops.resolve_project(preg, extra[0])
+            if sub == "setup-actions":
+                _print(projectops.list_project_setup_actions(
+                    preg, precord["id"], status="pending"))
+                return 0
+            if len(extra) < 2:
+                print("usage: mcp resolve-setup-action <project-id> "
+                     "<action-id>", file=sys.stderr)
+                return 2
+            _print(projectops.resolve_project_setup_action(
+                preg, precord["id"], extra[1]))
             return 0
         if not extra:
             print("usage: mcp %s <id>" % sub, file=sys.stderr)
@@ -517,6 +734,102 @@ def cmd_mcp(cfg, args):
         print("mcp error: %s" % exc, file=sys.stderr)
         return 1
     print("unknown mcp subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
+def cmd_plugin(cfg, args):
+    """plugin decompose|evaluate <directory>
+
+    Phase 7: decomposes a plugin bundle into skill/hook/mcp_server/lsp/
+    executable components and evaluates each independently -- an unsafe
+    executable or hook never blocks a safe skill component, and nothing
+    here installs/enables anything by itself."""
+    from core.pluginreg import PluginError, decompose_plugin, evaluate_plugin_components
+    sub = args.plan or "evaluate"
+    extra = args.extra or []
+    if not extra:
+        print("usage: plugin %s <directory>" % sub, file=sys.stderr)
+        return 2
+    try:
+        if sub == "decompose":
+            _print(decompose_plugin(extra[0]))
+            return 0
+        if sub == "evaluate":
+            _print(evaluate_plugin_components(extra[0]))
+            return 0
+    except PluginError as exc:
+        print("plugin error: %s" % exc, file=sys.stderr)
+        return 1
+    print("unknown plugin subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
+def cmd_models(cfg, args):
+    """models list|refresh|resolve <alias>|select <role> [risk]|capacity
+
+    Model Capability Registry (Phase 8) + Hierarchical Orchestration
+    (Phase 9): a dynamic per-machine catalogue of what models are
+    actually installed/authenticated right now, classified into
+    frontier|high|medium|lightweight|unknown tiers -- never a hardcoded
+    list of specific model names. `refresh` re-probes (same safe
+    version/auth/model-list commands `doctor` already uses, never a
+    generation call) and persists; `list` reads the last saved snapshot
+    (or discovers fresh if none exists); `resolve <alias>` answers e.g.
+    `orchestrator_frontier` / `coder_medium` / `local_fallback`;
+    `select <role> [risk]` is the full explainable role-aware routing
+    decision (frontier capacity reservation included); `capacity` shows
+    the current frontier reserve status."""
+    from core.modelcap import (ModelCapError, discover_registry,
+                               load_registry, save_registry)
+    sub = args.plan or "list"
+    extra = args.extra or []
+    if sub == "refresh":
+        registry = discover_registry(cfg, memory_dir=MEMORY)
+        save_registry(MEMORY, registry)
+        _print(registry.to_dict())
+        return 0
+    if sub == "list":
+        registry = load_registry(MEMORY) or \
+            discover_registry(cfg, memory_dir=MEMORY)
+        _print(registry.to_dict())
+        return 0
+    if sub == "resolve":
+        if not extra:
+            print("usage: models resolve <alias>", file=sys.stderr)
+            return 2
+        registry = load_registry(MEMORY) or \
+            discover_registry(cfg, memory_dir=MEMORY)
+        try:
+            record = registry.resolve_alias(extra[0])
+        except ModelCapError as exc:
+            print("models error: %s" % exc, file=sys.stderr)
+            return 1
+        if record is None:
+            print("no available model satisfies %r right now" % extra[0],
+                 file=sys.stderr)
+            return 1
+        _print(record)
+        return 0
+    if sub in ("select", "capacity"):
+        from core.capacity import CapacityLedger
+        from core.hierarchy import frontier_capacity_status, select_for_role
+        registry = load_registry(MEMORY) or \
+            discover_registry(cfg, memory_dir=MEMORY)
+        ledger = CapacityLedger(cfg, MEMORY)
+        if sub == "capacity":
+            status, detail = frontier_capacity_status(cfg, ledger, registry)
+            _print({"status": status, **detail})
+            return 0
+        if not extra:
+            print("usage: models select <role> [risk]", file=sys.stderr)
+            return 2
+        decision = select_for_role(
+            extra[0], cfg, registry, ledger,
+            task_risk=extra[1] if len(extra) > 1 else "medium")
+        _print(decision)
+        return 0 if decision["ok"] else 1
+    print("usage: models list|refresh|resolve <alias>|select <role> "
+         "[risk]|capacity", file=sys.stderr)
     return 2
 
 
@@ -718,6 +1031,77 @@ def cmd_skills(cfg, args):
                 print("approved at its pinned revision; enable with "
                       "'skills enable %s'" % extra[0])
             return 0
+        # -- risk-based acquisition (Phase 6) -------------------------------
+        if sub == "policy":
+            from core.skillacquire import policy_from_cfg
+            _print(policy_from_cfg(cfg))
+            return 0
+        if sub == "discover-for-project":
+            if not extra:
+                print("usage: skills discover-for-project <project-id>",
+                     file=sys.stderr)
+                return 2
+            from core import projectops
+            from core.registry import ProjectRegistry
+            from core.skillacquire import (acquire_skill_for_capability,
+                                           policy_from_cfg)
+            preg = ProjectRegistry()
+            record = projectops.resolve_project(preg, extra[0])
+            plan = projectops.load_capability_plan(preg, record["id"]) or \
+                projectops.analyse_capabilities(preg, record)
+            if plan is None:
+                print("no plan file found for project %s" % record["id"],
+                     file=sys.stderr)
+                return 1
+            from core.capability import load_taxonomy
+            taxonomy = load_taxonomy(strict=True)
+            market = projectops.skill_market(cfg)
+            policy = policy_from_cfg(cfg)
+            runtime_dir = preg.project_runtime_dir(record["id"])
+            results = {}
+            all_ids = {r["capability_id"] for r in
+                      plan["required_capabilities"] +
+                      plan["optional_capabilities"]}
+            for cap_id in sorted(all_ids):
+                cap_def = taxonomy.get(cap_id)
+                if not cap_def or not cap_def.get("suggested_skills"):
+                    continue
+                results[cap_id] = acquire_skill_for_capability(
+                    market, cap_def, policy=policy, project_id=record["id"],
+                    runtime_dir=runtime_dir)
+            _print(results)
+            return 0
+        if sub == "evaluation":
+            if not extra:
+                print("usage: skills evaluation <skill-id>", file=sys.stderr)
+                return 2
+            from core.registry import ProjectRegistry
+            from core.skillacquire import classify_trust_level, LEVEL_NAMES
+            from core.skillmarket import SkillMarket
+            market = SkillMarket(cfg, str(AGENTIC_DIR),
+                                 ProjectRegistry().home)
+            record = market.candidate(extra[0])
+            level, reasons = classify_trust_level(record)
+            _print({"skill": extra[0], "state": record.get("state"),
+                   "evaluation_result": record.get("evaluation_result"),
+                   "trust_level": LEVEL_NAMES[level], "reasons": reasons})
+            return 0
+        if sub == "provenance":
+            if not extra:
+                print("usage: skills provenance <skill-id>", file=sys.stderr)
+                return 2
+            from core.registry import ProjectRegistry
+            from core.skillmarket import SkillMarket
+            market = SkillMarket(cfg, str(AGENTIC_DIR),
+                                 ProjectRegistry().home)
+            installed = registry.get(extra[0])
+            try:
+                candidate = market.candidate(extra[0])
+            except SkillError:
+                candidate = None
+            _print({"skill": extra[0], "installed": installed,
+                   "acquisition_history": candidate})
+            return 0
     except SkillError as exc:
         print("skills error: %s" % exc, file=sys.stderr)
         return 1
@@ -824,6 +1208,8 @@ COMMANDS = {
     "context": cmd_context, "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
     "project": cmd_project, "fleet": cmd_fleet, "mcp": cmd_mcp,
+    "capability": cmd_capability, "plugin": cmd_plugin,
+    "models": cmd_models,
     "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
     "status": cmd_status, "logs": cmd_logs, "dashboard": cmd_dashboard,
 }

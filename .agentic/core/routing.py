@@ -19,15 +19,11 @@ Enforced policies:
 import datetime as _dt
 import json
 import os
-import re
 
+from .modelres import EMBEDDING_RE, is_embedding_model  # noqa: F401
 from .redact import redact
 
 LEVELS = {"none": 0, "low": 1, "medium": 2, "high": 3, "highest": 4}
-
-# roles whose output is prose/code generation: embedding models excluded
-EMBEDDING_RE = re.compile(r"(?i)(embed|embedding|bge-|-e5|e5-|minilm|"
-                          r"nomic-embed)")
 
 REVIEWER_ROLES = {"qa", "qa_reviewer", "security", "security_reviewer",
                   "verifier", "final_auditor"}
@@ -128,7 +124,7 @@ def capability_chain(cfg, role, memory_dir=None, board=None, ledger=None,
     for name, bcfg in backends_cfg.items():
         caps = backend_capabilities(bcfg or {})
         model = (bcfg or {}).get("model")
-        if model and EMBEDDING_RE.search(str(model)):
+        if is_embedding_model(model):
             rejected.append({"backend": name,
                              "reason": "embedding model %r cannot serve "
                                        "generative roles" % model})

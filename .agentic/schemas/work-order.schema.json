@@ -128,6 +128,46 @@
         "string",
         "null"
       ]
+    },
+    "task_id": {
+      "type": ["string", "null"]
+    },
+    "source_requirements": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "required_capabilities": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "selected_skills": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "selected_mcp_tools": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "selected_plugin_components": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "selected_agent_role": {
+      "type": ["string", "null"]
+    },
+    "selected_backend": {
+      "type": ["string", "null"]
+    },
+    "selected_model": {
+      "type": ["string", "null"]
+    },
+    "evidence_requirements": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "protected_actions": {
+      "type": "array",
+      "items": {"type": "string"}
     }
   }
 }

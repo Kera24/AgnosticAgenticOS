@@ -21,8 +21,14 @@ Config shape (per backend, in config.yaml / config.machine.yaml):
       read_args: []
       prompt_via: stdin                  # stdin | arg
       parse: auto                        # auto | json | text
+      model: auto                        # auto/missing/placeholder -> no
+                                          # model flag; the authenticated
+                                          # CLI (e.g. Claude Code) picks its
+                                          # own subscription default
+      model_flag: --model                # flag used when model IS explicit
 """
 from core import errors
+from core.modelres import resolve_model
 
 from .cli_base import (CLIBackendBase, classify_cli_failure, compose_prompt,
                        extract_first_json, parse_retry_hint,
@@ -32,9 +38,19 @@ WRITE_ROLES = {"coder", "worker"}
 
 
 class ConfiguredCLIBackend(CLIBackendBase):
+    def __init__(self, name, cfg, runner=None, which=None, env=None):
+        super().__init__(name, cfg, runner=runner, which=which, env=env)
+        self.last_model_resolution = None
+
     def build_argv(self, role, permissions):
         argv = [self.binary()] + [str(a) for a in
                                   self.cfg.get("invoke_args", [])]
+        resolution = resolve_model(role, "cli", self.name,
+                                   backend_model=self.cfg.get("model"))
+        self.last_model_resolution = resolution
+        if resolution["model_flag_emitted"]:
+            argv += [str(self.cfg.get("model_flag", "--model")),
+                     resolution["resolved_model"]]
         if permissions == "write" and role in WRITE_ROLES:
             argv += [str(a) for a in self.cfg.get("write_args", [])]
         else:

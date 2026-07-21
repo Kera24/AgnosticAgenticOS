@@ -27,6 +27,7 @@ import json
 import re
 
 from core import errors
+from core import modelres
 
 from .cli_base import (CLIBackendBase, classify_cli_failure, compose_prompt,
                        parse_retry_hint, validate_cli_command)
@@ -130,6 +131,7 @@ class CodexCLIBackend(CLIBackendBase):
         super().__init__(name, cfg, runner=runner, which=which, env=env)
         self._caps = None
         self.last_smoke = None
+        self.last_model_resolution = None
 
     def sandbox_for(self, role, permissions):
         if permissions == "write" and role in WRITE_ROLES:
@@ -203,8 +205,11 @@ class CodexCLIBackend(CLIBackendBase):
                  "--sandbox", self.sandbox_for(role, permissions)]
         if workspace:
             argv += ["--cd", str(workspace)]
-        if self.cfg.get("model"):
-            argv += ["--model", str(self.cfg["model"])]
+        resolution = modelres.resolve_model(
+            role, "cli", self.name, backend_model=self.cfg.get("model"))
+        self.last_model_resolution = resolution
+        if resolution["model_flag_emitted"]:
+            argv += ["--model", resolution["resolved_model"]]
         argv += list(self.cfg.get("extra_args", []))
         argv.append("-")   # prompt arrives on stdin
         return validate_cli_command(argv)

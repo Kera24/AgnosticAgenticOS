@@ -123,7 +123,7 @@ def sandbox(tmp_path, base_cfg, monkeypatch):
     git(["commit", "-m", "initial"], repo)
 
     agentic = tmp_path / "agentic"
-    for sub in ("prompts", "schemas", "guardrails"):
+    for sub in ("prompts", "schemas", "guardrails", "capabilities"):
         shutil.copytree(AGENTIC_SRC / sub, agentic / sub)
     for sub in ("memory", "queue", "runs", "goals", "worktrees"):
         (agentic / sub).mkdir()

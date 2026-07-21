@@ -1,0 +1,30 @@
+{
+  "$id": "agentic/capability-graph",
+  "type": "object",
+  "required": ["project_id", "graph_version", "nodes", "edges"],
+  "properties": {
+    "project_id": {"type": "string"},
+    "graph_version": {"type": "integer", "minimum": 1},
+    "nodes": {"type": "object"},
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "type", "attributes"],
+        "properties": {
+          "from": {"type": "string"},
+          "to": {"type": "string"},
+          "type": {"type": "string", "enum": [
+            "requirement_requires_capability", "capability_depends_on",
+            "capability_satisfied_by_skill", "capability_satisfied_by_mcp",
+            "capability_satisfied_by_plugin",
+            "capability_assigned_to_agent",
+            "capability_validated_by_check", "check_produces_evidence",
+            "evidence_satisfies_acceptance_criterion",
+            "capability_conflicts_with", "capability_alternative_to"]},
+          "attributes": {"type": "object"}
+        }
+      }
+    }
+  }
+}

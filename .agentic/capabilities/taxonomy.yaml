@@ -1,0 +1,1234 @@
+# Capability Taxonomy (Phase 2 of the Capability Intelligence upgrade).
+#
+# Provider-neutral, version-controlled, declarative. Capability IDs are
+# never coupled to a specific skill/MCP/plugin: `suggested_*` fields are
+# hints the Capability Resolver (Phase 5) may or may not use, and a
+# capability can be satisfied multiple ways (skill, MCP tool, plugin
+# component, deterministic tool, or an agent role's own competence).
+#
+# `mandatory_conditions` is a small declarative predicate list interpreted
+# by the Requirements Intelligence Engine (Phase 3), not evaluated here.
+# Supported predicate keys (any one true makes the capability mandatory
+# for that predicate; the list itself is OR'd):
+#   project_type_in: [project_type, ...]
+#   requirement_matches: [regex-or-keyword, ...]   # matched against the
+#     project specification's functional requirements / other text
+#   capability_present: capability_id               # mandatory once this
+#     other capability has already been selected (dependency-driven)
+# An empty `mandatory_conditions` list means "never automatically
+# mandatory" -- the capability is only added when directly triggered.
+#
+# Organisation- or project-specific additions/overrides live in
+# `.agentic/capabilities/org/*.yaml` (same shape, merged on top of this
+# file by id) -- see core/capability/taxonomy.py.
+
+taxonomy_version: 1
+
+categories:
+  - architecture
+  - frontend
+  - backend
+  - database
+  - authentication
+  - authorisation
+  - security
+  - privacy
+  - accessibility
+  - SEO
+  - structured_data
+  - performance
+  - responsive_design
+  - design_system
+  - testing
+  - browser_testing
+  - API
+  - integrations
+  - payments
+  - email
+  - messaging
+  - analytics
+  - observability
+  - Docker
+  - Supabase
+  - PostgreSQL
+  - storage
+  - realtime
+  - documentation
+  - deployment
+  - compliance
+  - localisation
+  - PWA
+  - offline_support
+  - mobile
+  - AI/ML
+  - vector_search
+  - memory
+  - data_migration
+
+capabilities:
+  # -- architecture --------------------------------------------------------
+  - id: architecture_baseline
+    name: Architecture Baseline
+    category: architecture
+    description: >
+      A coherent, documented technical architecture (module boundaries,
+      data flow, chosen stack) proportionate to the project's scale.
+    triggers: [architecture, tech stack, structure]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool,
+      static_site, cli_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [architect]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [architecture_documented]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application, api_service, internal_tool,
+          static_site, cli_tool]
+    evidence_requirements: [architecture.md exists and describes the
+      chosen stack]
+    version: 1
+
+  # -- frontend / design ----------------------------------------------------
+  - id: frontend_ui
+    name: Frontend UI Implementation
+    category: frontend
+    description: User-facing interface implementation for the product.
+    triggers: [ui, interface, frontend, page, screen, website]
+    requirement_patterns: [page, screen, form, button, navigate]
+    project_types: [web_application, static_site]
+    dependencies: [responsive_design]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, ui_designer]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [builds_without_errors]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application, static_site]
+    evidence_requirements: [rendered pages match functional requirements]
+    version: 1
+
+  - id: responsive_design
+    name: Responsive Design
+    category: responsive_design
+    description: Layout adapts correctly across common viewport sizes.
+    triggers: [responsive, mobile friendly, tablet, viewport]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, ui_designer, qa]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [viewport_breakpoints_checked]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application, static_site]
+    evidence_requirements: [screenshots or checks at mobile/tablet/desktop
+      breakpoints]
+    version: 1
+
+  - id: design_system
+    name: Design System Consistency
+    category: design_system
+    description: >
+      Consistent typography, spacing, colour, and component reuse rather
+      than ad hoc one-off styling per page.
+    triggers: [design system, brand, style guide, component library]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [ui_designer, coder]
+    suggested_skills: [frontend-design]
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: low
+    mandatory_conditions: []
+    evidence_requirements: [shared tokens/components reused across pages]
+    version: 1
+
+  # -- backend / API --------------------------------------------------------
+  - id: backend_api
+    name: Backend API Implementation
+    category: backend
+    description: Server-side logic and endpoints implementing the product's
+      functional requirements.
+    triggers: [backend, server, endpoint, business logic]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [builds_without_errors]
+    risk_level: medium
+    mandatory_conditions:
+      - project_type_in: [api_service]
+    evidence_requirements: [endpoints implement stated functional
+      requirements]
+    version: 1
+
+  - id: api_design
+    name: API Design
+    category: API
+    description: >
+      A coherent, versionable API surface (REST/GraphQL/RPC) with
+      consistent error handling and input validation.
+    triggers: [api, rest, graphql, endpoint design]
+    requirement_patterns: [api]
+    project_types: [api_service, web_application]
+    dependencies: [backend_api]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, architect]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [api_error_handling_consistent]
+    risk_level: medium
+    mandatory_conditions:
+      - project_type_in: [api_service]
+    evidence_requirements: [documented endpoints with input validation]
+    version: 1
+
+  # -- database ---------------------------------------------------------------
+  - id: relational_database
+    name: Relational Database
+    category: database
+    description: A relational schema backing persistent application data.
+    triggers: [database, schema, sql, table, store data]
+    requirement_patterns: [store, save, database, records]
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: [supabase]
+    conflicts_with: []
+    agent_roles: [coder, architect]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [schema_documented]
+    risk_level: medium
+    mandatory_conditions: []
+    evidence_requirements: [schema exists and matches functional
+      requirements]
+    version: 1
+
+  - id: data_migration
+    name: Data Migration
+    category: data_migration
+    description: Reproducible, version-controlled schema/data migrations
+      rather than ad hoc manual changes.
+    triggers: [migration, migrate data, schema change]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: [relational_database]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [migration_reproducible_locally]
+    risk_level: medium
+    mandatory_conditions:
+      - capability_present: relational_database
+    evidence_requirements: [migration files, local apply/rollback proof]
+    version: 1
+
+  # -- auth / authz / security / privacy --------------------------------------
+  - id: authentication
+    name: Authentication
+    category: authentication
+    description: Users can securely prove their identity (sign up, sign in,
+      session management).
+    triggers: [login, sign up, sign in, authentication, auth, account]
+    requirement_patterns: ['log ?in', 'sign ?up', 'sign ?in', account,
+      authenticate]
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, security]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [session_management_reviewed]
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: ['log ?in', 'sign ?up', 'sign ?in', account]
+    evidence_requirements: [secure session handling, security reviewer
+      pass]
+    version: 1
+
+  - id: authorisation
+    name: Authorisation
+    category: authorisation
+    description: Access to data/actions is correctly restricted by role or
+      ownership.
+    triggers: [authorisation, authorization, permissions, roles, access
+      control]
+    requirement_patterns: [role, permission, admin, access control]
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: [authentication]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, security]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [authorisation_tests_present]
+    risk_level: medium
+    mandatory_conditions:
+      - capability_present: authentication
+    evidence_requirements: [authorisation tests covering each role]
+    version: 1
+
+  - id: row_level_security
+    name: Row-Level Security
+    category: authorisation
+    description: Database-enforced per-row access policies (e.g. Postgres
+      RLS) so authorisation cannot be bypassed by direct data access.
+    triggers: [row level security, rls, tenant isolation, multi-tenant]
+    requirement_patterns: [multi-tenant, tenant, row level security, rls]
+    project_types: [web_application, api_service]
+    dependencies: [authorisation]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, security]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [rls_policies_reviewed, tenant_isolation_tested]
+    risk_level: medium
+    mandatory_conditions:
+      - capability_present: supabase
+      - requirement_matches: [multi-tenant, tenant isolation]
+    evidence_requirements: [RLS policies exist and are reviewed; isolation
+      test evidence]
+    version: 1
+
+  - id: security_review
+    name: Security Review
+    category: security
+    description: Independent review of security-relevant changes
+      (authentication, payments, file handling, injection risk).
+    triggers: [security, vulnerability, pentest, secure]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [security]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [security_reviewer_pass]
+    risk_level: low
+    mandatory_conditions:
+      - capability_present: authentication
+      - capability_present: payments
+    evidence_requirements: [security reviewer verdict recorded]
+    version: 1
+
+  - id: privacy_review
+    name: Privacy Review
+    category: privacy
+    description: >
+      Review of what personal data is collected/stored and whether
+      retention/handling is proportionate. Never a legal/compliance
+      determination -- flags for human review when uncertain.
+    triggers: [privacy, personal data, pii, gdpr, data protection]
+    requirement_patterns: [personal data, email address, phone number,
+      privacy]
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [security, qa]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [data_inventory_recorded]
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [personal data, email, phone, address, pii]
+    evidence_requirements: [recorded inventory of personal data fields
+      collected]
+    version: 1
+
+  - id: compliance_baseline
+    name: Compliance Baseline
+    category: compliance
+    description: >
+      Flags requirements implying a specific legal/compliance regime
+      (payments, health data, children's data) for human decision --
+      never inferred or self-certified by a model.
+    triggers: [compliance, regulation, pci, hipaa, coppa]
+    requirement_patterns: [pci, hipaa, coppa, gdpr compliant, sox]
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [security]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: high
+    mandatory_conditions:
+      - requirement_matches: [pci, hipaa, coppa, sox, gdpr compliant]
+    evidence_requirements: [human decision recorded before proceeding]
+    version: 1
+
+  # -- accessibility / SEO / structured data / performance ---------------------
+  - id: accessibility
+    name: Accessibility
+    category: accessibility
+    description: Keyboard operability, semantic structure, contrast, and
+      screen-reader compatibility.
+    triggers: [accessibility, a11y, wcag, screen reader, keyboard]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [ui_designer, qa]
+    suggested_skills: [accessibility-review]
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [automated_accessibility_scan,
+      keyboard_navigation_checked]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application, static_site]
+    evidence_requirements: [automated a11y scan results, keyboard-nav
+      confirmation]
+    version: 1
+
+  - id: technical_seo
+    name: Technical SEO
+    category: SEO
+    description: Baseline crawlability and indexability for public-facing
+      pages.
+    triggers: [seo, search engine, rank, google, discoverability]
+    requirement_patterns: [rank, search results, seo, google]
+    project_types: [web_application, static_site]
+    dependencies: [sitemap, robots, metadata]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, qa]
+    suggested_skills: [seo-optimization, technical-seo]
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [sitemap_present, robots_present,
+      meta_titles_present]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [static_site]
+      - requirement_matches: [seo, rank, search engine, discoverability]
+    evidence_requirements: [sitemap.xml, robots.txt, per-page metadata]
+    version: 1
+
+  - id: local_seo
+    name: Local SEO
+    category: SEO
+    description: Location-specific discoverability (local business schema,
+      address/hours consistency, local keywords).
+    triggers: [local seo, near me, location based]
+    requirement_patterns: ['search(es)? in ', 'near me', 'local business']
+    project_types: [web_application, static_site]
+    dependencies: [technical_seo, structured_data]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, qa]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [local_business_schema_present]
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [local seo, near me, 'search(es)? in ']
+    evidence_requirements: [LocalBusiness structured data present]
+    version: 1
+
+  - id: sitemap
+    name: XML Sitemap
+    category: SEO
+    description: A generated, up-to-date sitemap.xml listing indexable
+      pages.
+    triggers: [sitemap]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [sitemap_present]
+    risk_level: low
+    mandatory_conditions: []
+    evidence_requirements: [sitemap.xml generated and reachable]
+    version: 1
+
+  - id: robots
+    name: robots.txt
+    category: SEO
+    description: A robots.txt correctly permitting/blocking crawler access.
+    triggers: [robots.txt, crawler, disallow]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [robots_present]
+    risk_level: low
+    mandatory_conditions: []
+    evidence_requirements: [robots.txt present with sensible rules]
+    version: 1
+
+  - id: metadata
+    name: Page Metadata
+    category: SEO
+    description: Per-page title, description, and social-share (Open
+      Graph) metadata.
+    triggers: [meta tags, page title, meta description, open graph]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [meta_titles_present]
+    risk_level: low
+    mandatory_conditions: []
+    evidence_requirements: [unique title/description per page]
+    version: 1
+
+  - id: structured_data
+    name: Structured Data
+    category: structured_data
+    description: Schema.org / JSON-LD structured data for rich search
+      results.
+    triggers: [structured data, schema.org, json-ld, rich snippet]
+    requirement_patterns: [structured data, schema.org]
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [structured_data_valid]
+    risk_level: low
+    mandatory_conditions: []
+    evidence_requirements: [valid JSON-LD present on relevant pages]
+    version: 1
+
+  - id: performance
+    name: Performance
+    category: performance
+    description: Acceptable load time and responsiveness for the project's
+      scale.
+    triggers: [performance, fast, slow, load time, speed]
+    requirement_patterns: [fast, performance, load time]
+    project_types: [web_application, static_site, api_service]
+    dependencies: [image_optimisation]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, qa]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [performance_budget_met]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application, static_site]
+    evidence_requirements: [performance check results within budget]
+    version: 1
+
+  - id: image_optimisation
+    name: Image Optimisation
+    category: performance
+    description: Images are sized, compressed, and served in modern
+      formats appropriately.
+    triggers: [image optimisation, image size, lazy load]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: low
+    mandatory_conditions: []
+    evidence_requirements: [images sized/compressed appropriately]
+    version: 1
+
+  # -- testing ------------------------------------------------------------------
+  - id: automated_testing
+    name: Automated Testing
+    category: testing
+    description: Deterministic automated tests covering the stated
+      functional requirements.
+    triggers: [test, testing, unit test, coverage]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool,
+      static_site, cli_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, qa]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [tests_pass]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application, api_service, internal_tool,
+          static_site, cli_tool]
+    evidence_requirements: [test run output, pass/fail per requirement]
+    version: 1
+
+  - id: browser_testing
+    name: Browser Testing
+    category: browser_testing
+    description: The application is actually driven in a real or headless
+      browser, not merely typechecked.
+    triggers: [browser test, e2e, playwright, click through]
+    requirement_patterns: []
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [qa]
+    suggested_skills: []
+    suggested_mcp_capabilities: [browser_automation]
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [golden_path_driven_in_browser]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application]
+    evidence_requirements: [screenshot or trace of the golden path
+      working]
+    version: 1
+
+  # -- integrations / payments / email / messaging / analytics -----------------
+  - id: third_party_integration
+    name: Third-Party Integration
+    category: integrations
+    description: Integration with an external service the project
+      specification names.
+    triggers: [integrate, integration, third party, external service]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: medium
+    mandatory_conditions: []
+    evidence_requirements: [integration behaves per the named service's
+      documented contract]
+    version: 1
+
+  - id: payments
+    name: Payments
+    category: payments
+    description: >
+      Payment collection, webhook validation, and idempotent handling.
+      Always implies a security review; never implies permission to use
+      real payment credentials or move real money in tests.
+    triggers: [payment, checkout, stripe, billing, subscription, invoice]
+    requirement_patterns: [pay, checkout, subscription, billing,
+      invoice]
+    project_types: [web_application, api_service]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, security]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [webhook_signature_verified,
+      idempotency_key_used]
+    risk_level: high
+    mandatory_conditions:
+      - requirement_matches: [payment, checkout, subscription, billing]
+    evidence_requirements: [webhook validation + idempotency evidence,
+      security reviewer pass]
+    version: 1
+
+  - id: transactional_email
+    name: Transactional Email
+    category: email
+    description: System-triggered email (confirmation, password reset,
+      receipt) via a configured provider.
+    triggers: [email, send email, notification email, receipt]
+    requirement_patterns: ['send.{0,15}email', 'email confirmation']
+    project_types: [web_application, api_service]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: [email_provider]
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: ['send.{0,15}email', 'email confirmation',
+          'password reset email']
+    evidence_requirements: [email content/template reviewed; no real send
+      in automated tests]
+    version: 1
+
+  - id: messaging
+    name: Messaging
+    category: messaging
+    description: In-product or external messaging (SMS, chat, push)
+      beyond email.
+    triggers: [sms, push notification, chat message, messaging]
+    requirement_patterns: [sms, push notification]
+    project_types: [web_application, api_service]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: [messaging_provider]
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [sms, push notification]
+    evidence_requirements: [message content reviewed; no real send in
+      automated tests]
+    version: 1
+
+  - id: web_analytics
+    name: Web Analytics
+    category: analytics
+    description: Privacy-respecting usage analytics wired into the
+      product.
+    triggers: [analytics, tracking, page views, metrics dashboard]
+    requirement_patterns: [analytics, track usage]
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: [analytics_provider]
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [analytics, track usage]
+    evidence_requirements: [events fire for stated key actions]
+    version: 1
+
+  - id: observability
+    name: Observability
+    category: observability
+    description: Logging/metrics sufficient to diagnose failures after
+      deployment.
+    triggers: [logging, monitoring, observability, alerting]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [health_check_present]
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [production deployment, deploy to
+          production]
+    evidence_requirements: [health check endpoint, basic structured
+      logging]
+    version: 1
+
+  # -- Docker / Supabase / Postgres / storage / realtime -----------------------
+  - id: docker
+    name: Docker
+    category: Docker
+    description: >
+      Project services run in Docker locally, using the project's own
+      compose file. Running/resetting local containers is always allowed;
+      remote/production container operations are not.
+    triggers: [docker, container, compose, dockerfile]
+    requirement_patterns: [docker, container]
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: [dockerx]
+    validation_checks: [compose_starts_locally]
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [docker, container]
+    evidence_requirements: [local compose up succeeds]
+    version: 1
+
+  - id: supabase
+    name: Supabase
+    category: Supabase
+    description: >
+      Supabase as the backing database/auth/storage platform. Local
+      apply/reset is automatic; staging/production mutation always
+      requires approval (see core/supabasex.py environment_policy).
+    triggers: [supabase]
+    requirement_patterns: [supabase]
+    project_types: [web_application, api_service]
+    dependencies: [database_migrations]
+    alternatives: [relational_database]
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: [supabase]
+    suggested_plugins: []
+    deterministic_tools: [supabasex]
+    validation_checks: [local_reset_succeeds]
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [supabase]
+    evidence_requirements: [migrations apply locally, generated types
+      current]
+    version: 1
+
+  - id: generated_types
+    name: Generated Database Types
+    category: Supabase
+    description: Application-language types generated from the current
+      database schema, kept in sync with migrations.
+    triggers: [generated types, type generation]
+    requirement_patterns: []
+    project_types: [web_application, api_service]
+    dependencies: [supabase]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: [supabase]
+    suggested_plugins: []
+    deterministic_tools: [supabasex]
+    validation_checks: [generated_types_current]
+    risk_level: low
+    mandatory_conditions:
+      - capability_present: supabase
+    evidence_requirements: [generated types file matches current schema]
+    version: 1
+
+  - id: local_database_testing
+    name: Local Database Testing
+    category: Supabase
+    description: Tests run against a local, disposable database instance
+      -- never a shared or production one.
+    triggers: [local database testing, test database]
+    requirement_patterns: []
+    project_types: [web_application, api_service]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, qa]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: [supabasex]
+    validation_checks: [tests_use_local_database]
+    risk_level: low
+    mandatory_conditions:
+      - capability_present: supabase
+      - capability_present: relational_database
+    evidence_requirements: [test run confirms local-only database target]
+    version: 1
+
+  - id: postgresql
+    name: PostgreSQL
+    category: PostgreSQL
+    description: PostgreSQL as the relational database engine.
+    triggers: [postgresql, postgres, psql]
+    requirement_patterns: [postgres]
+    project_types: [web_application, api_service, internal_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [postgres]
+      - capability_present: supabase
+    evidence_requirements: [schema targets PostgreSQL]
+    version: 1
+
+  - id: database_migrations
+    name: Database Migrations
+    category: PostgreSQL
+    description: >
+      Every schema change is a version-controlled migration file; direct
+      ad hoc schema edits are never the source of truth.
+    triggers: [database migration, schema migration]
+    requirement_patterns: []
+    project_types: [web_application, api_service]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: [supabasex]
+    validation_checks: [migration_reproducible_locally]
+    risk_level: medium
+    mandatory_conditions:
+      - capability_present: supabase
+      - capability_present: postgresql
+    evidence_requirements: [migration files reproduce the schema from
+      empty]
+    version: 1
+
+  - id: file_storage
+    name: File Storage
+    category: storage
+    description: >
+      User-uploaded or generated file storage, with validation, size
+      limits, and a defined access policy.
+    triggers: [file upload, storage, attachment, image upload]
+    requirement_patterns: [upload, attachment, file storage]
+    project_types: [web_application, api_service]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, security]
+    suggested_skills: []
+    suggested_mcp_capabilities: [storage_provider]
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [upload_size_limit_enforced,
+      upload_type_validated]
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [upload, attachment]
+    evidence_requirements: [size/type validation evidence, storage access
+      policy documented]
+    version: 1
+
+  - id: realtime_updates
+    name: Realtime Updates
+    category: realtime
+    description: Live updates pushed to connected clients (websocket/
+      realtime subscription) rather than polling.
+    triggers: [realtime, live update, websocket, subscription]
+    requirement_patterns: ['real.?time', 'live update', websocket]
+    project_types: [web_application]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: [supabase]
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: ['real.?time', 'live update']
+    evidence_requirements: [update latency and delivery demonstrated]
+    version: 1
+
+  # -- documentation / deployment / localisation / PWA / offline / mobile ------
+  - id: documentation
+    name: Documentation
+    category: documentation
+    description: README/setup docs sufficient for a new contributor to run
+      the project locally.
+    triggers: [documentation, readme, docs]
+    requirement_patterns: []
+    project_types: [web_application, api_service, internal_tool,
+      static_site, cli_tool]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [readme_present]
+    risk_level: low
+    mandatory_conditions:
+      - project_type_in: [web_application, api_service, internal_tool,
+          static_site, cli_tool]
+    evidence_requirements: [README with local setup + run instructions]
+    version: 1
+
+  - id: deployment_readiness
+    name: Deployment Readiness
+    category: deployment
+    description: >
+      Health checks, environment configuration, and a documented deploy
+      procedure. Never implies permission to actually deploy --
+      `deployment_authorised` in project.md gates that separately.
+    triggers: [deploy, deployment, production, hosting]
+    requirement_patterns: [deploy, production]
+    project_types: [web_application, api_service]
+    dependencies: [observability]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [health_check_present, env_example_present]
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [deploy, production]
+    evidence_requirements: [health check, .env.example, deploy steps
+      documented -- no deploy performed]
+    version: 1
+
+  - id: localisation
+    name: Localisation
+    category: localisation
+    description: Content/UI structured for translation into more than one
+      language.
+    triggers: [localisation, localization, i18n, translate, multi
+      language]
+    requirement_patterns: [i18n, 'multi.?language', translate]
+    project_types: [web_application, static_site]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [i18n, 'multi.?language', translate]
+    evidence_requirements: [strings externalised from markup]
+    version: 1
+
+  - id: pwa
+    name: Progressive Web App
+    category: PWA
+    description: Installable, manifest-driven progressive web app
+      behaviour.
+    triggers: [pwa, progressive web app, installable, add to home screen]
+    requirement_patterns: [pwa, installable, add to home screen]
+    project_types: [web_application]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: [manifest_present]
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [pwa, progressive web app, installable]
+    evidence_requirements: [valid manifest.json, installable check]
+    version: 1
+
+  - id: offline_support
+    name: Offline Support
+    category: offline_support
+    description: The application remains usable, in a defined degraded
+      mode, without network connectivity.
+    triggers: [offline, offline support, service worker]
+    requirement_patterns: [offline]
+    project_types: [web_application]
+    dependencies: [pwa]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [offline]
+    evidence_requirements: [offline behaviour demonstrated]
+    version: 1
+
+  - id: mobile_optimisation
+    name: Mobile Optimisation
+    category: mobile
+    description: >
+      Touch-target sizing, gesture support, and mobile-specific UX beyond
+      basic responsive layout.
+    triggers: [mobile app, touch, gesture, native app]
+    requirement_patterns: [mobile app, native app]
+    project_types: [web_application]
+    dependencies: [responsive_design]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [ui_designer, coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [mobile app, native app]
+    evidence_requirements: [touch-target sizing reviewed]
+    version: 1
+
+  # -- AI/ML / vector search / application memory -------------------------------
+  - id: ai_ml_integration
+    name: AI/ML Integration
+    category: AI/ML
+    description: The product itself calls a model/inference service as
+      part of its own functionality.
+    triggers: [ai, machine learning, model, inference, llm, chatbot]
+    requirement_patterns: ['\bai\b', machine learning, chatbot, inference]
+    project_types: [web_application, api_service]
+    dependencies: []
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder, architect]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: ['\bai\b', machine learning, chatbot,
+          inference]
+    evidence_requirements: [model call cost/latency reviewed]
+    version: 1
+
+  - id: vector_search
+    name: Vector Search
+    category: vector_search
+    description: Embedding-based similarity search over product content.
+    triggers: [vector search, embeddings, semantic search, similarity
+      search]
+    requirement_patterns: [vector search, semantic search, embeddings]
+    project_types: [web_application, api_service]
+    dependencies: [ai_ml_integration]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: medium
+    mandatory_conditions:
+      - requirement_matches: [vector search, semantic search]
+    evidence_requirements: [search relevance spot-checked]
+    version: 1
+
+  - id: application_memory
+    name: Application Memory
+    category: memory
+    description: >
+      The PRODUCT itself remembers state/history across sessions (e.g. a
+      chat history, saved preferences) -- distinct from Agentic OS's own
+      build-time memory.
+    triggers: [remember, conversation history, saved preferences, session
+      memory]
+    requirement_patterns: [remember, conversation history, saved
+      preferences]
+    project_types: [web_application, api_service]
+    dependencies: [relational_database]
+    alternatives: []
+    conflicts_with: []
+    agent_roles: [coder]
+    suggested_skills: []
+    suggested_mcp_capabilities: []
+    suggested_plugins: []
+    deterministic_tools: []
+    validation_checks: []
+    risk_level: low
+    mandatory_conditions:
+      - requirement_matches: [remember, conversation history, saved
+          preferences]
+    evidence_requirements: [state persists across a new session]
+    version: 1

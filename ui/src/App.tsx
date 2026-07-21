@@ -18,6 +18,7 @@ import { Memory } from "./pages/Memory";
 import { Knowledge } from "./pages/Knowledge";
 import { Skills } from "./pages/Skills";
 import { Routing } from "./pages/Routing";
+import { Capability } from "./pages/Capability";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -48,6 +49,7 @@ export function App() {
               <Route path="memory" element={<Memory />} />
               <Route path="knowledge" element={<Knowledge />} />
               <Route path="skills" element={<Skills />} />
+              <Route path="capability" element={<Capability />} />
               <Route path="capacity" element={<Capacity />} />
               <Route path="verification" element={<Verification />} />
               <Route path="activity" element={<Activity />} />

@@ -50,6 +50,181 @@ def find_plan(record):
     return None
 
 
+def load_specification(record):
+    """Parse the project's plan file into a normalised
+    ProjectSpecification (core.projectspec). Returns None only when no
+    plan file exists at all -- an existing plan.md with no frontmatter
+    and no recognised headers still parses successfully (backward
+    compatible: `raw_text` is always preserved verbatim)."""
+    plan_path = find_plan(record)
+    if not plan_path:
+        return None
+    from .projectspec import parse_project_spec
+    with open(plan_path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    return parse_project_spec(text)
+
+
+def analyse_capabilities(registry, record):
+    """Run the Requirements Intelligence Engine (Phase 3) against the
+    project's specification -- deterministic, no model call, no network.
+    Returns None only when no plan file exists at all."""
+    spec = load_specification(record)
+    if spec is None:
+        return None
+    from .capability import load_taxonomy
+    from .capability.requirements import analyse_requirements
+    taxonomy = load_taxonomy(strict=True)
+    project_type = (spec.get("frontmatter") or {}).get("project_type")
+    return analyse_requirements(spec, taxonomy, project_id=record["id"],
+                               project_type=project_type,
+                               repo_root=record["root_path"])
+
+
+def save_capability_plan(registry, project_id, plan):
+    runtime_dir = registry.project_runtime_dir(project_id)
+    projstate.write_yaml(runtime_dir, "capability-plan.yaml", plan)
+    return plan
+
+
+def load_capability_plan(registry, project_id):
+    runtime_dir = registry.project_runtime_dir(project_id)
+    return projstate.read_yaml(runtime_dir, "capability-plan.yaml", None)
+
+
+def build_capability_graph(registry, record, plan=None):
+    """Build (not persist) the CapabilityGraph (Phase 4) for a project's
+    current specification + capability plan. Deterministic -- no model
+    call, no network."""
+    spec = load_specification(record)
+    if spec is None:
+        return None
+    plan = plan or load_capability_plan(registry, record["id"]) or \
+        analyse_capabilities(registry, record)
+    if plan is None:
+        return None
+    from .capability import load_taxonomy
+    from .capability.graph import build_graph
+    taxonomy = load_taxonomy(strict=True)
+    return build_graph(spec, plan, taxonomy, project_id=record["id"])
+
+
+def save_capability_graph(registry, project_id, graph):
+    from .capability.graph import save_graph
+    runtime_dir = registry.project_runtime_dir(project_id)
+    return save_graph(runtime_dir, graph)
+
+
+def load_capability_graph(registry, project_id):
+    from .capability.graph import load_graph
+    runtime_dir = registry.project_runtime_dir(project_id)
+    return load_graph(runtime_dir)
+
+
+def _platform_registries(cfg):
+    """Real installed skill/MCP registries -- resolution never invents
+    its own view of what's installed/approved; it reuses exactly what
+    `skills`/`mcp` commands already report."""
+    from .config import AGENTIC_DIR
+    from .mcp import MCPGateway
+    from .registry import ProjectRegistry
+    from .skillreg import SkillRegistry
+    skill_registry = SkillRegistry(cfg, str(AGENTIC_DIR))
+    mcp_gateway = MCPGateway(cfg, ProjectRegistry().home)
+    return skill_registry, mcp_gateway
+
+
+def skill_market(cfg):
+    from .config import AGENTIC_DIR
+    from .registry import ProjectRegistry
+    from .skillmarket import SkillMarket
+    return SkillMarket(cfg, str(AGENTIC_DIR), ProjectRegistry().home)
+
+
+def _default_registry_search(cfg, record):
+    """The Phase 5 `registry_search` hook, backed by Phase 6's skill
+    acquisition pipeline AND Phase 7's MCP resolver. Makes no network
+    call itself (skill discover() only reads locally-configured/pre-
+    mirrored sources; MCP auto-configuration only ever launches a local
+    argv command through execpolicy) -- safe as an unconditional
+    default."""
+    from .mcp import MCPGateway
+    from .mcpresolve import resolve_mcp_for_capability
+    from .mcpresolve import policy_from_cfg as mcp_policy_from_cfg
+    from .skillacquire import acquire_skill_for_capability, policy_from_cfg
+    market = skill_market(cfg)
+    skill_policy = policy_from_cfg(cfg)
+    mcp_gateway = MCPGateway(cfg, ProjectRegistry().home)
+    mcp_policy = mcp_policy_from_cfg(cfg)
+    runtime_dir = ProjectRegistry().project_runtime_dir(record["id"])
+
+    def hook(cap_def):
+        results = acquire_skill_for_capability(
+            market, cap_def, policy=skill_policy, project_id=record["id"],
+            runtime_dir=runtime_dir)
+        results += resolve_mcp_for_capability(
+            mcp_gateway, cap_def, project_id=record["id"],
+            runtime_dir=runtime_dir, policy=mcp_policy)
+        return results
+    return hook
+
+
+def resolve_capabilities(cfg, registry, record, *, graph=None,
+                         registry_search=None):
+    """Run the Capability Resolver (Phase 5) over a project's graph,
+    acquiring safe candidates and persisting the updated graph. Returns
+    None only when there is no plan/graph to resolve against."""
+    graph = graph or load_capability_graph(registry, record["id"]) or \
+        build_capability_graph(registry, record)
+    if graph is None:
+        return None
+    from .capability import load_taxonomy
+    from .capability.resolver import resolve_project
+    taxonomy = load_taxonomy(strict=True)
+    skill_registry, mcp_gateway = _platform_registries(cfg)
+    if registry_search is None:
+        registry_search = _default_registry_search(cfg, record)
+    summary = resolve_project(
+        graph, taxonomy, skill_registry=skill_registry,
+        mcp_gateway=mcp_gateway, project_id=record["id"],
+        registry_search=registry_search)
+    save_capability_graph(registry, record["id"], graph)
+    return {"graph": graph, "summary": summary}
+
+
+def retry_capability(cfg, registry, record, capability_id, *, graph=None):
+    """Retry resolution for exactly one capability (bounded by the
+    resolver's own maximum-attempts guard)."""
+    graph = graph or load_capability_graph(registry, record["id"]) or \
+        build_capability_graph(registry, record)
+    if graph is None:
+        return None
+    from .capability import load_taxonomy
+    from .capability.resolver import resolve_capability
+    taxonomy = load_taxonomy(strict=True)
+    skill_registry, mcp_gateway = _platform_registries(cfg)
+    decision = resolve_capability(
+        "cap:%s" % capability_id, graph, taxonomy,
+        skill_registry=skill_registry, mcp_gateway=mcp_gateway,
+        project_id=record["id"],
+        registry_search=_default_registry_search(cfg, record))
+    save_capability_graph(registry, record["id"], graph)
+    return decision
+
+
+def preview_capability_candidates(cfg, registry, record, capability_id):
+    """Search + rank only -- never mutates the graph. For `capability
+    candidates <project> <capability-id>`."""
+    from .capability import load_taxonomy
+    from .capability.resolver import preview_candidates
+    taxonomy = load_taxonomy(strict=True)
+    skill_registry, mcp_gateway = _platform_registries(cfg)
+    return preview_candidates(
+        capability_id, taxonomy, skill_registry=skill_registry,
+        mcp_gateway=mcp_gateway, project_id=record["id"],
+        registry_search=_default_registry_search(cfg, record))
+
+
 def detect_integrations(root):
     """Docker/Supabase presence detection (expanded by their adapters)."""
     exists = lambda *p: os.path.exists(os.path.join(root, *p))  # noqa: E731
@@ -231,6 +406,29 @@ def project_status(cfg, registry, project_id):
             if projstate.exists(runtime_dir) else [],
             "plan": find_plan(record),
             "worktree": os.path.join(runtime_dir, "worktrees", "project")}
+
+
+def list_project_setup_actions(registry, project_id, *, status=None):
+    """The autonomy-inbox backing store (Phase 7): one-time setup
+    actions (OAuth, sensitive account, paid service, production
+    mutation) still pending for this project."""
+    from .mcpresolve import list_setup_actions
+    runtime_dir = registry.project_runtime_dir(project_id)
+    return list_setup_actions(runtime_dir, status=status)
+
+
+def resolve_project_setup_action(registry, project_id, action_id, *,
+                                 status="resolved"):
+    from .mcpresolve import resolve_setup_action
+    runtime_dir = registry.project_runtime_dir(project_id)
+    return resolve_setup_action(runtime_dir, action_id, status=status)
+
+
+def evaluate_plugin(directory, *, policy=None):
+    """Decompose + independently evaluate a plugin bundle's components
+    (Phase 7). Never mutates any registry -- purely an evaluation."""
+    from .pluginreg import evaluate_plugin_components
+    return evaluate_plugin_components(directory, policy=policy)
 
 
 def adopt_legacy(cfg, registry, name="platform-legacy"):

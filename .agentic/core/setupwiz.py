@@ -11,15 +11,22 @@ import yaml
 
 from . import backends as backends_mod
 from . import config as config_mod
+from .modelres import is_embedding_model
 
+# "model: auto" is model-NEUTRAL CLI configuration: no explicit model is
+# configured, so the authenticated subscription CLI selects its own
+# default (core.modelres.resolve_model). This is intentionally written for
+# Codex/Claude -- setup never asks a CLI user to pick an API-style model
+# name. Qwen is left unset (its readiness is authentication-gated, not
+# model-gated -- see core/authx.py).
 KNOWN_CLIS = {
     "codex": {"type": "cli", "kind": "codex", "binary": "codex",
-              "auth_probe_args": ["login", "status"]},
+              "auth_probe_args": ["login", "status"], "model": "auto"},
     "claude": {"type": "cli", "kind": "configured", "binary": "claude",
                "version_args": ["--version"],
                "invoke_args": ["-p", "--output-format", "json"],
                "write_args": ["--permission-mode", "acceptEdits"],
-               "prompt_via": "stdin", "parse": "auto"},
+               "prompt_via": "stdin", "parse": "auto", "model": "auto"},
     "qwen": {"type": "cli", "kind": "configured", "binary": "qwen",
              "version_args": ["--version"], "invoke_args": ["-p"],
              "prompt_via": "stdin", "parse": "auto"},
@@ -109,10 +116,31 @@ def run_setup(cfg=None, answers=None, echo=None, runner=None, which=None,
     for name, info in detected.items():
         if name == "ollama":
             model = None
-            if info.get("models"):
+            installed = info.get("models") or []
+            generation_models = [m for m in installed
+                                 if not is_embedding_model(m)]
+            if generation_models:
                 model = io.ask("Ollama model to use (%s)"
-                               % ", ".join(info["models"][:8]),
-                               default=info["models"][0])
+                               % ", ".join(generation_models[:8]),
+                               default=generation_models[0])
+                # validated against `ollama list`, never a typo or an
+                # embedding-only model -- see core.modelres.resolve_model
+                if model not in installed:
+                    io.say("  warning: %r is not an installed Ollama "
+                          "model (installed: %s); using %r instead"
+                          % (model, ", ".join(installed) or "none",
+                             generation_models[0]))
+                    model = generation_models[0]
+                elif is_embedding_model(model):
+                    io.say("  warning: %r is an embedding-only model and "
+                          "cannot serve a generative role; using %r "
+                          "instead" % (model, generation_models[0]))
+                    model = generation_models[0]
+            elif installed:
+                io.say("  warning: only embedding models are installed "
+                      "(%s); install a generation model with `ollama "
+                      "pull <model>` before Ollama can serve a role"
+                      % ", ".join(installed))
             machine["backends"]["ollama"] = {
                 "type": "local", "model": model,
                 "api_key_required": False, "cost_free": True}

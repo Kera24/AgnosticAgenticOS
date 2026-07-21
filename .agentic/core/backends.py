@@ -72,6 +72,7 @@ class APIBackendAdapter:
         self.provider = provider_registry.build(provider_name, pcfg,
                                                 transport=transport, env=env)
         self.cost_free = getattr(self.provider, "cost_free", False)
+        self.last_model_resolution = None
 
     def detect(self):
         return {"installed": True, "version": None, "models": []}
@@ -90,6 +91,13 @@ class APIBackendAdapter:
 
     def invoke(self, role, prompt, input_data, workspace, permissions,
                timeout):
+        from .modelres import resolve_model
+        resolution = resolve_model(role, self.backend_type, self.name,
+                                   backend_model=self.bcfg.get("model"))
+        self.last_model_resolution = resolution
+        if not resolution["valid"]:
+            raise errors.ModelUnavailableError(resolution["explanation"],
+                                               provider=self.name)
         resp = self.provider.invoke(
             self.bcfg.get("model"), prompt, input_data=input_data,
             timeout=timeout,
@@ -251,6 +259,10 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                                     workspace, permissions, timeout)
         except errors.AgenticError as exc:
             duration = round(time.time() - started, 1)
+            resolution = getattr(adapter, "last_model_resolution", None)
+            if resolution is not None and exc.diagnostic is None:
+                from .modelres import diagnostic_lines
+                exc.diagnostic = diagnostic_lines(resolution)
             ledger.record_call(name, agent_role, ok=False, event=exc.kind,
                                duration_seconds=duration)
             board.record_failure(
@@ -258,7 +270,8 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                 retry_after_seconds=getattr(exc, "retry_after_seconds", None),
                 reset_at=getattr(exc, "reset_at", None))
             log({"event": "backend_error", "backend": name, "role": agent_role,
-                 "kind": exc.kind, "detail": exc.detail[:200]})
+                 "kind": exc.kind, "detail": exc.detail[:200],
+                 "diagnostic": exc.diagnostic})
             last_err = exc
             if exc.kind in errors.NO_FALLBACK_KINDS:
                 return error_result(name, agent_role, exc,

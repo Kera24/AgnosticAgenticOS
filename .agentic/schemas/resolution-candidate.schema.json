@@ -1,0 +1,32 @@
+{
+  "$id": "agentic/resolution-candidate",
+  "type": "object",
+  "required": ["id", "capability_id", "type", "source", "name", "risk",
+               "trust", "quality_score", "maintenance_score", "status"],
+  "properties": {
+    "id": {"type": "string"},
+    "capability_id": {"type": "string"},
+    "type": {"type": "string", "enum": ["deterministic_tool",
+      "agent_competence", "skill", "mcp_tool", "plugin_component",
+      "external_registry"]},
+    "source": {"type": "string"},
+    "name": {"type": "string"},
+    "version": {"type": ["string", "null"]},
+    "revision": {"type": ["string", "null"]},
+    "publisher": {"type": ["string", "null"]},
+    "description": {"type": "string"},
+    "compatibility": {"type": "number", "minimum": 0, "maximum": 1},
+    "permissions": {"type": "array", "items": {"type": "string"}},
+    "dependencies": {"type": "array", "items": {"type": "string"}},
+    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+    "trust": {"type": "number", "minimum": 0, "maximum": 1},
+    "quality_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "maintenance_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "evaluation_score": {"type": ["number", "null"]},
+    "token_cost": {"type": "number", "minimum": 0},
+    "acquisition_cost": {"type": "number", "minimum": 0},
+    "status": {"type": "string", "enum": ["candidate", "available",
+      "unavailable", "acquired", "rejected"]},
+    "rejection_reason": {"type": ["string", "null"]}
+  }
+}

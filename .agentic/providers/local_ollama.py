@@ -1,10 +1,16 @@
 """Local Ollama backend: detection and model discovery via the `ollama` CLI,
 inference via its OpenAI-compatible HTTP endpoint (reusing the existing
-adapter). Monetary cost is zero; time/token limits still apply."""
+adapter). Monetary cost is zero; time/token limits still apply.
+
+The configured model is validated against `ollama list` BEFORE the HTTP
+call: a typo'd or uninstalled model name is reported as a clear
+pre-invocation configuration error (core.modelres), not discovered as a
+confusing HTTP 404 mid-call."""
 import shutil
 
 from core import errors
 from core import execpolicy
+from core.modelres import resolve_model
 
 from .ollama import OllamaProvider
 
@@ -42,6 +48,7 @@ class OllamaLocalBackend:
         self.which = which
         self.provider = OllamaProvider(name, self.cfg, transport=transport,
                                        env=env)
+        self.last_model_resolution = None
 
     def detect(self):
         return detect_ollama(runner=self.runner, which=self.which)
@@ -54,10 +61,15 @@ class OllamaLocalBackend:
 
     def invoke(self, role, prompt, input_data, workspace, permissions,
                timeout):
-        model = self.cfg.get("model")
-        if not model:
-            raise errors.ModelUnavailableError(
-                "no Ollama model selected (run setup)", provider=self.name)
+        detected = self.detect().get("models") or []
+        resolution = resolve_model(role, "local", self.name,
+                                   backend_model=self.cfg.get("model"),
+                                   detected_models=detected)
+        self.last_model_resolution = resolution
+        if not resolution["valid"]:
+            raise errors.ModelUnavailableError(resolution["explanation"],
+                                               provider=self.name)
+        model = resolution["resolved_model"]
         resp = self.provider.invoke(
             model, prompt, input_data=input_data, timeout=timeout,
             max_output_tokens=self.cfg.get("max_output_tokens"),

@@ -1,0 +1,57 @@
+{
+  "$id": "agentic/project-specification",
+  "type": "object",
+  "required": ["schema_version", "frontmatter", "sections", "assumptions",
+               "blocking_questions", "warnings", "raw_text"],
+  "properties": {
+    "schema_version": {"type": "integer", "minimum": 1},
+    "frontmatter": {
+      "type": "object",
+      "required": ["agentic_project_version", "project_type", "priority",
+                   "autonomy", "deployment_authorised",
+                   "remote_push_authorised"],
+      "properties": {
+        "agentic_project_version": {"type": "integer", "minimum": 1},
+        "project_type": {"type": "string", "minLength": 1},
+        "priority": {"type": "integer", "minimum": 1, "maximum": 100},
+        "autonomy": {"type": "string",
+                    "enum": ["completion_only", "milestone_review",
+                             "cycle_review"]},
+        "deployment_authorised": {"type": "boolean"},
+        "remote_push_authorised": {"type": "boolean"}
+      }
+    },
+    "sections": {"type": "object"},
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["section", "classification", "value", "reason"],
+        "properties": {
+          "section": {"type": "string"},
+          "classification": {
+            "type": "string",
+            "enum": ["optional", "safely_inferable",
+                     "important_but_non_blocking", "materially_blocking"]
+          },
+          "value": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "blocking_questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["section", "classification", "question"],
+        "properties": {
+          "section": {"type": "string"},
+          "classification": {"type": "string"},
+          "question": {"type": "string"}
+        }
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "raw_text": {"type": "string"}
+  }
+}

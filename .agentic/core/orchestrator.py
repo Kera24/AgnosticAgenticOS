@@ -131,13 +131,15 @@ def apply_policy(cfg, order, trust_ledger, protected_patterns):
 
 # -- worker edit application (code-enforced) ---------------------------------
 
-def apply_edits(worktree, edits, allowed, forbidden, protected):
+def apply_edits(worktree, edits, allowed, forbidden, protected,
+                authorised_exceptions=None):
     """Apply worker edits with hard path enforcement. Returns violations;
     on any violation nothing more is applied."""
     violations = []
     for edit in edits:
         rel = edit.get("path", "")
-        bad = gitops.check_paths([rel], allowed, forbidden, protected)
+        bad = gitops.check_paths([rel], allowed, forbidden, protected,
+                                 authorised_exceptions=authorised_exceptions)
         if bad:
             violations.extend(bad)
             continue
