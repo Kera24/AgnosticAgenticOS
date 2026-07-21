@@ -39,6 +39,9 @@ Full-project build:
   python .agentic/run project-review    run the final audit now
   python .agentic/run capacity          capacity ledger + next-cycle estimate
   python .agentic/run backends          backend circuit-breaker states
+  python .agentic/run backends reset-breaker <backend>
+                                        clear a stale breaker (state,
+                                        unavailable_until, failure count)
   python .agentic/run package           clean distributable archive
   python .agentic/run ui                local Control Centre dashboard
                                         (--port N --no-open; loopback only)
@@ -279,6 +282,14 @@ def cmd_backends(cfg, args):
     if args.plan == "auth":
         from core.authx import backend_auth_report
         _print(backend_auth_report(cfg, MEMORY))
+        return 0
+    if args.plan == "reset-breaker":
+        name = (args.extra or [None])[0]
+        if not name:
+            print("usage: backends reset-breaker <backend>", file=sys.stderr)
+            return 2
+        previous = BreakerBoard(MEMORY).reset(name)
+        _print({"backend": name, "state": "available", "previous": previous})
         return 0
     if args.plan == "smoke":
         # OPT-IN: makes ONE real call and consumes real quota

@@ -113,6 +113,7 @@ export interface Backend {
   roles: string[];
   is_primary: boolean;
   in_fallbacks: boolean;
+  recoverable_now: boolean;
   usable: boolean | null;
   api_key_env?: string;
 }

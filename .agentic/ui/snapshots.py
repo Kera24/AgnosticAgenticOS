@@ -229,6 +229,7 @@ def backends_snapshot(cfg, detected, apis):
             "roles": sorted(set(assigned.get(name, []))),
             "is_primary": routing.get("primary") == name,
             "in_fallbacks": name in (routing.get("fallbacks") or []),
+            "recoverable_now": bool(breaker) and board.is_recoverable(name),
             "usable": None,
         }
         if btype == "cli":

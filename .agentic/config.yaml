@@ -295,6 +295,13 @@ backends:
     model: null              # selected during setup from installed models
     api_key_required: false
     cost_free: true
+    # Local models can need substantial cold-start time to load; these are
+    # separate from execution.command_timeout_seconds (which still governs
+    # Codex/Claude/API backends unchanged) so tuning Ollama never affects them.
+    connect_timeout_seconds: 10
+    first_token_timeout_seconds: 300
+    total_timeout_seconds: 900
+    cold_start_grace_seconds: 300
   # API backends reference the providers section; enable by assigning a model:
   # openai_api:  {type: api, provider: openai, model: your-model}
   # claude_api:  {type: api, provider: anthropic, model: your-model}

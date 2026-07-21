@@ -50,9 +50,18 @@ def run_command(cmd, cwd, timeout, env=None, shell_required=False,
               "shell": use_shell, "timed_out": False, "exit_code": None,
               "stdout": "", "stderr": ""}
     try:
+        # encoding must be explicit: without it, Python 3's subprocess falls
+        # back to locale.getpreferredencoding() for both stdin and captured
+        # output. On Windows that's typically a codepage (e.g. cp1252), not
+        # UTF-8 -- encoding a prompt containing any character outside that
+        # codepage silently produces bytes that are NOT valid UTF-8, which a
+        # CLI expecting a UTF-8 stdin stream (Codex, Claude Code, ...)
+        # correctly rejects ("input is not valid UTF-8"). Every argv/prompt
+        # this policy sends is UTF-8 by construction, so force it both ways.
         proc = subprocess.run(popen_cmd, shell=use_shell, cwd=cwd,
                               capture_output=True, text=True, timeout=timeout,
-                              env=run_env, input=stdin_text)
+                              env=run_env, input=stdin_text,
+                              encoding="utf-8", errors="replace")
         result["exit_code"] = proc.returncode
         result["stdout"] = proc.stdout or ""
         result["stderr"] = proc.stderr or ""

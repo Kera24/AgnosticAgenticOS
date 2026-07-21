@@ -153,7 +153,8 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
         err = result.get("error") or {}
         return {"status": "architect_failed", "error": err.get("kind"),
                 "detail": err.get("detail"),
-                "diagnostic": err.get("diagnostic")}
+                "diagnostic": err.get("diagnostic"),
+                "routing_attempts": result.get("routing_attempts", [])}
     out = result["structured_output"]
     a = p["agentic"]
     projstate.write_text(a, "PROJECT.md",

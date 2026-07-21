@@ -229,6 +229,14 @@ def record_verification(memory_dir, backend, ok, detail=""):
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
     os.replace(tmp, verification_path(memory_dir))
+    if ok:
+        # a fresh, successful smoke/auth verification is real evidence the
+        # backend works right now -- let a stale, locally-inferred circuit
+        # breaker recover early rather than staying disabled on a timer
+        # (never overrides a provider-stated rate/usage limit; see
+        # BreakerBoard.recover_if_verified).
+        from .breaker import BreakerBoard
+        BreakerBoard(memory_dir).recover_if_verified(backend)
     return data[backend]
 
 

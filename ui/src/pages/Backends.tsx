@@ -90,6 +90,13 @@ function BackendRow({
                 label={`${backend.name} retry countdown`}
               />
             )}
+            {backend.recoverable_now && (
+              <StatusChip
+                outline
+                status={{ tone: "idle", label: "Recoverable" }}
+                title="A successful smoke test would likely clear this breaker now"
+              />
+            )}
           </span>
         </span>
         <span className="fact">

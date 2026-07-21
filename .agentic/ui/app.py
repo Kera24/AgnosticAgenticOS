@@ -396,13 +396,12 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
                                      "confirm=true to proceed")
         from core.breaker import BreakerBoard
         board = BreakerBoard(memory)
-        entry = board.entry(name)
-        entry.update(state="available", unavailable_until=None,
-                     consecutive_failures=0, failed_since=None)
-        board.save()
-        audit("ui_breaker_reset", backend=name)
+        previous = board.reset(name)
+        audit("ui_breaker_reset", backend=name,
+             previous_state=previous.get("state"),
+             discarded_unavailable_until=previous.get("unavailable_until"))
         bus.publish("state", {"changed": "backends"})
-        return {"backend": name, "state": "available"}
+        return {"backend": name, "state": "available", "previous": previous}
 
     # -- capacity / verification -------------------------------------------------
     @app.get(API + "/capacity")

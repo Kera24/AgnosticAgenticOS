@@ -146,6 +146,49 @@ class BreakerBoard:
             entry["state"] = "available"
             self.save()
 
+    # Locally-inferred failure states a fresh verification may end early.
+    # Deliberately excludes rate_limited/usage_exhausted: those are
+    # provider-STATED cooldowns (an explicit retry_after/reset_at), never
+    # overridden by a local smoke pass -- see recover_if_verified().
+    _STALE_RECOVERABLE_STATES = ("degraded", "unavailable", "cooling",
+                                 "authentication_required")
+
+    def is_recoverable(self, backend):
+        """True if `recover_if_verified(backend)` would currently change
+        anything -- i.e. this backend LOOKS broken but a fresh smoke/auth
+        verification would likely clear it (dashboard/doctor visibility)."""
+        return self.entry(backend)["state"] in self._STALE_RECOVERABLE_STATES
+
+    def recover_if_verified(self, backend):
+        """A successful, fresh authentication/smoke verification
+        (`core.authx.record_verification(..., ok=True)`) is real evidence
+        the backend works right now -- a stale circuit breaker must not
+        keep it permanently disabled once that evidence exists. Only
+        locally-inferred states are eligible (never a provider-stated
+        rate/usage limit -- that retry-after is never concealed). Returns
+        True if the breaker actually changed state."""
+        entry = self.entry(backend)
+        if entry["state"] in self._STALE_RECOVERABLE_STATES:
+            entry.update(state="available", unavailable_until=None,
+                        consecutive_failures=0, failed_since=None)
+            self.save()
+            return True
+        return False
+
+    def reset(self, backend):
+        """Explicit, admin-confirmed reset (CLI `backends reset-breaker` /
+        dashboard) -- clears ANY state, including a provider-stated
+        rate/usage limit. Returns the record exactly as it was immediately
+        before the reset, so the caller can see and log precisely what was
+        discarded: an active retry-after is disclosed, never silently
+        thrown away."""
+        entry = self.entry(backend)
+        previous = dict(entry)
+        entry.update(state="available", unavailable_until=None,
+                     consecutive_failures=0, failed_since=None)
+        self.save()
+        return previous
+
     def render(self):
         lines = ["%-14s %-24s %-20s %s" % ("BACKEND", "STATE",
                                            "UNAVAILABLE_UNTIL", "FAILS")]

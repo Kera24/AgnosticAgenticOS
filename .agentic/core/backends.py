@@ -181,6 +181,14 @@ def _fill_usage(result, prompt):
     return usage
 
 
+def _attempt(backend, role, *, eligible, attempted, result, reason):
+    """One entry of the routing_attempts diagnostic: every backend in the
+    chain gets exactly one, whether or not it was ever actually invoked --
+    the final result must never report only the last fallback's failure."""
+    return {"backend": backend, "role": role, "eligible": bool(eligible),
+           "attempted": bool(attempted), "result": result, "reason": reason}
+
+
 def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                    output_schema=None, workspace=None, permissions="read",
                    timeout=None, run_context=None, *, ledger, board,
@@ -188,7 +196,9 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                    which=None, env=None, log=None, prompt_builder=None):
     """Invoke a role on a backend chain. Returns the normalized result
     (`ok: false` + typed error rather than raising, except for programming
-    errors).
+    errors). Every return path carries `routing_attempts`: one entry per
+    backend in the chain, so a caller never sees only the final fallback's
+    failure with no record of why an earlier backend was skipped.
 
     prompt_builder: optional callable(backend_name) -> prompt. When given,
     the prompt is REBUILT for each backend in the chain so a fallback model
@@ -200,6 +210,7 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
     chain = [backend_name] + [b for b in (fallback_chain or [])
                               if b != backend_name]
     last_err = errors.BackendUnavailableError("no backend attempted")
+    attempts = []
     for position, name in enumerate(chain):
         state = board.state(name)
         if state == "cooling":
@@ -216,10 +227,20 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
             else:
                 log({"event": "routing_skip", "backend": name,
                      "reason": "health check failed while cooling"})
+                attempts.append(_attempt(
+                    name, agent_role, eligible=False, attempted=False,
+                    result="skipped",
+                    reason="circuit breaker cooling; health check failed"))
                 continue
         elif state not in ("available", "degraded"):
             log({"event": "routing_skip", "backend": name, "reason": state,
                  "until": board.unavailable_until(name)})
+            attempts.append(_attempt(
+                name, agent_role, eligible=False, attempted=False,
+                result="skipped",
+                reason="circuit breaker state=%s%s" % (
+                    state, (" until %s" % board.unavailable_until(name))
+                    if board.unavailable_until(name) else "")))
             continue
         limit_reasons = ledger.limit_status(name)
         if limit_reasons:
@@ -227,6 +248,10 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                  "reason": "self-imposed limit: " + "; ".join(limit_reasons)})
             last_err = errors.UsageLimitError("; ".join(limit_reasons),
                                               provider=name)
+            attempts.append(_attempt(
+                name, agent_role, eligible=False, attempted=False,
+                result="skipped",
+                reason="self-imposed limit: " + "; ".join(limit_reasons)))
             continue
         if position > 0:
             log({"event": "fallback", "role": agent_role, "to": name,
@@ -240,6 +265,10 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                 errors.BackendUnavailableError(str(exc), provider=name)
             log({"event": "backend_build_failed", "backend": name,
                  "detail": str(exc)[:200]})
+            attempts.append(_attempt(
+                name, agent_role, eligible=True, attempted=False,
+                result="failure",
+                reason="backend build failed: %s" % str(exc)[:200]))
             continue
 
         if prompt_builder is not None and position > 0:
@@ -252,6 +281,10 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                     provider=name)
                 log({"event": "context_rebuild_failed", "backend": name,
                      "detail": str(exc)[:200]})
+                attempts.append(_attempt(
+                    name, agent_role, eligible=True, attempted=False,
+                    result="failure",
+                    reason="context rebuild failed: %s" % str(exc)[:200]))
                 continue
         started = time.time()
         try:
@@ -273,9 +306,16 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                  "kind": exc.kind, "detail": exc.detail[:200],
                  "diagnostic": exc.diagnostic})
             last_err = exc
+            attempts.append(_attempt(
+                name, agent_role, eligible=True, attempted=True,
+                result="no_fallback" if exc.kind in errors.NO_FALLBACK_KINDS
+                else "failure",
+                reason="%s: %s" % (exc.kind, exc.detail[:200])))
             if exc.kind in errors.NO_FALLBACK_KINDS:
-                return error_result(name, agent_role, exc,
-                                    getattr(adapter, "backend_type", "?"))
+                failed = error_result(name, agent_role, exc,
+                                      getattr(adapter, "backend_type", "?"))
+                failed["routing_attempts"] = attempts
+                return failed
             continue
 
         duration = round(time.time() - started, 1)
@@ -292,9 +332,17 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                                   getattr(adapter, "backend_type", "?"))
             failed["content"] = result.get("content", "")
             failed["refusal"] = True
+            attempts.append(_attempt(
+                name, agent_role, eligible=True, attempted=True,
+                result="refused", reason="backend refused"))
+            failed["routing_attempts"] = attempts
             return failed
 
         if output_schema is None:
+            attempts.append(_attempt(
+                name, agent_role, eligible=True, attempted=True,
+                result="success", reason="invoked successfully"))
+            result["routing_attempts"] = attempts
             return result
 
         structured = extract_first_json(result.get("content", ""))
@@ -303,6 +351,10 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                       else ["no JSON object found in response"])
         if not violations:
             result["structured_output"] = structured
+            attempts.append(_attempt(
+                name, agent_role, eligible=True, attempted=True,
+                result="success", reason="invoked successfully"))
+            result["routing_attempts"] = attempts
             return result
         log({"event": "malformed_output", "backend": name,
              "role": agent_role, "violations": violations[:5]})
@@ -319,13 +371,31 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
                           else ["no JSON object found in repaired response"])
             if not violations:
                 repair["structured_output"] = structured
+                attempts.append(_attempt(
+                    name, agent_role, eligible=True, attempted=True,
+                    result="success",
+                    reason="invoked successfully after schema repair"))
+                repair["routing_attempts"] = attempts
                 return repair
         except errors.AgenticError as exc:
             last_err = exc
+            attempts.append(_attempt(
+                name, agent_role, eligible=True, attempted=True,
+                result="failure",
+                reason="schema repair failed: %s: %s"
+                % (exc.kind, exc.detail[:200])))
             continue
         last_err = errors.MalformedOutputError("; ".join(violations[:5]),
                                                provider=name)
+        attempts.append(_attempt(
+            name, agent_role, eligible=True, attempted=True,
+            result="failure",
+            reason="malformed output: " + "; ".join(violations[:5])))
         continue
 
-    return error_result(chain[-1] if chain else backend_name, agent_role,
-                        last_err)
+    failed = error_result(chain[-1] if chain else backend_name, agent_role,
+                          last_err)
+    failed["routing_attempts"] = attempts
+    log({"event": "routing_exhausted", "role": agent_role,
+         "attempts": attempts})
+    return failed
