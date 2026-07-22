@@ -14,7 +14,7 @@ import os
 import re
 
 from . import backends, bootstrap_gate, capacity as capacity_mod
-from . import config as config_mod
+from . import config as config_mod, decision_policy
 from . import errors, gate, gitops, logs, notify, projstate
 from .breaker import BreakerBoard
 from .orchestrator import (apply_edits, load_prompt, _schema, _snapshot)
@@ -182,11 +182,22 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
     update_knowledge(cfg, a, log)
     log({"event": "project_started", "tasks": len(tasks),
          "milestones": len(out["milestones"])})
-    for decision in out.get("human_decisions", []):
-        projstate.add_blocker(a, None, decision, human_only=True)
+    # reversible implementation preferences (test framework, CSS approach,
+    # ...) are resolved autonomously right away -- only what's left after
+    # that ever becomes a human blocker (item 6/9: never pause execution
+    # for a decision a human never needed to make).
+    resolved = decision_policy.auto_resolve_reversible_decisions(a, p["root"])
+    if resolved:
+        log({"event": "reversible_decisions_auto_resolved",
+             "decisions": [r["decision"] for r in resolved]})
+    remaining = projstate.read_yaml(
+        a, "decisions.yaml", {}).get("human_decisions_needed", [])
+    for decision in remaining:
+        projstate.add_blocker(a, None, decision, human_only=True,
+                              code=projstate.BLOCKER_CODE_GENUINE_HUMAN_DECISION)
     return {"status": "started", "tasks": len(tasks),
             "milestones": len(out["milestones"]),
-            "human_decisions": out.get("human_decisions", [])}
+            "human_decisions": remaining}
 
 
 def _remember(cfg, memory_dir, rtype, title, summary, **kw):
@@ -349,6 +360,10 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     capability_plan = projstate.read_yaml(a, "capability-plan.yaml", None)
     authorised_exceptions = gitops.capability_authorised_exceptions(
         capability_plan)
+    # -- persisted-state recovery: runs BEFORE any human-blocker gate below,
+    # so a project stuck on a since-fixed platform bug (or on a decision
+    # that was never actually a human's to make) self-heals on its own
+    # next cycle instead of surfacing a stale human_required forever.
     try:   # restart recovery: surface abandoned task worktrees
         from . import taskspace as _ts
         abandoned = _ts.recover_abandoned(p["root"], a)
@@ -361,9 +376,22 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         recovered = bootstrap_gate.recover_bootstrap_deadlock(a)
         if recovered:
             log({"event": "bootstrap_deadlock_recovered", "run_id": run_id,
-                 "tasks": recovered})
+                 "recovered": recovered})
     except Exception:   # noqa: BLE001 — recovery is best-effort
         pass
+    try:   # auto-resolve reversible technical choices left over from a
+           # project started before this policy existed
+        resolved = decision_policy.auto_resolve_reversible_decisions(
+            a, p["root"])
+        if resolved:
+            log({"event": "reversible_decisions_auto_resolved",
+                 "run_id": run_id,
+                 "decisions": [r["decision"] for r in resolved]})
+    except Exception:   # noqa: BLE001 — recovery is best-effort
+        pass
+    if scheduler.state.get("project_status") == "blocked_on_human" and \
+            not projstate.open_blockers(a, human_only=True):
+        scheduler.set_project_status("in_progress")
 
     task = projstate.next_task(a)
     if task is None:
@@ -404,7 +432,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     projstate.update_task(a, task["id"], status="in_progress")
 
     def fail(outcome, detail, retry_after=None, block=False,
-             blocking_reason=None):
+             blocking_reason=None, human_only=False, code=None):
         from . import taskspace as _ts
         _ts.release_claim(a, task["id"])   # failed worktree stays as evidence
         projstate.update_task(
@@ -413,7 +441,12 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
             attempts=task["attempts"] + 1, last_result=outcome,
             blocking_reason=blocking_reason or (detail[:200] if block else None))
         if block:
-            projstate.add_blocker(a, task["id"], blocking_reason or detail)
+            # the ONLY place a blocker is recorded for a task failure --
+            # never duplicate this with a second add_blocker call at the
+            # call site, or a legacy human_only=True/False duplicate pair
+            # (like the one this fixed) reappears.
+            projstate.add_blocker(a, task["id"], blocking_reason or detail,
+                                  human_only=human_only, code=code)
             _remember(cfg, p["memory"], "failed_attempt",
                       "task %s blocked" % task["id"],
                       (blocking_reason or detail)[:400],
@@ -559,7 +592,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
             # failure gets the normal repair attempts before blocking --
             # generated work is no longer discarded on first contact.
             eligible, reason = bootstrap_gate.bootstrap_eligible(
-                task, projstate.load_backlog(a))
+                task, projstate.load_backlog(a),
+                bootstrap_gate.decisions_text(a))
             if eligible:
                 gate_result = bootstrap_gate.run_structural_checks(
                     task, worktree,
@@ -570,13 +604,15 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                      "tests": gate_result["tests"]})
             else:
                 _revert_worktree(worktree)
-                projstate.add_blocker(
-                    a, task["id"], bootstrap_gate.NO_CHECKS_HUMAN_REASON,
-                    human_only=True)
+                # a single add_blocker call (inside fail()) -- the
+                # pre-fix duplicate (one human_only=True blocker recorded
+                # here PLUS a second human_only=False one from fail()'s
+                # own add_blocker) is exactly the bug the live pilot hit.
                 return fail(
                     "failure", "zero deterministic checks: blocking",
-                    block=True,
-                    blocking_reason=bootstrap_gate.NO_CHECKS_BLOCKER_REASON)
+                    block=True, human_only=True,
+                    blocking_reason=bootstrap_gate.NO_CHECKS_HUMAN_REASON,
+                    code=bootstrap_gate.DETERMINISTIC_CHECKS_MISSING_CODE)
         if not gate_result["ok"]:
             failing = [r for r in gate_result["results"]
                        if r["mandatory"] and not r["passed"]]

@@ -199,10 +199,34 @@ def refresh_progress(agentic_dir):
     return progress
 
 
-def add_blocker(agentic_dir, task_id, reason, human_only=False):
+# Stable blocker classification (never free-form reason text): the code a
+# blocker was recorded with is what dedup and recovery key off. `code` is
+# optional and defaults to None for call sites that predate this taxonomy
+# or that don't fit it -- those keep the old (no-dedup) behaviour exactly.
+BLOCKER_CODE_DETERMINISTIC_CHECKS_MISSING = "deterministic_checks_missing"
+BLOCKER_CODE_GENUINE_HUMAN_DECISION = "genuine_human_decision"
+BLOCKER_CODE_POLICY_DENIED = "policy_denied"
+BLOCKER_CODE_DEPENDENCY_MISSING = "dependency_missing"
+BLOCKER_CODE_AUTHENTICATION_REQUIRED = "authentication_required"
+BLOCKER_CODES = (BLOCKER_CODE_DETERMINISTIC_CHECKS_MISSING,
+                 BLOCKER_CODE_GENUINE_HUMAN_DECISION,
+                 BLOCKER_CODE_POLICY_DENIED,
+                 BLOCKER_CODE_DEPENDENCY_MISSING,
+                 BLOCKER_CODE_AUTHENTICATION_REQUIRED)
+
+
+def add_blocker(agentic_dir, task_id, reason, human_only=False, code=None):
+    """Append a blocker unless an unresolved one already exists for the
+    same (task_id, code) -- a stable code, never free-form reason text,
+    is what prevents duplicate human/non-human records for one failure."""
     blockers = read_yaml(agentic_dir, "blockers.yaml", {"blockers": []})
+    if code is not None and any(
+            not b.get("resolved") and b.get("task") == task_id and
+            b.get("code") == code for b in blockers["blockers"]):
+        return
     blockers["blockers"].append({
-        "task": task_id, "reason": reason, "human_only": bool(human_only),
+        "task": task_id, "reason": reason, "code": code,
+        "human_only": bool(human_only),
         "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
         "resolved": False})
     write_yaml(agentic_dir, "blockers.yaml", blockers)

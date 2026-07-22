@@ -252,7 +252,7 @@ def test_recover_bootstrap_deadlock_unblocks_only_eligible_tasks(sandbox):
                           bootstrap_gate.NO_CHECKS_HUMAN_REASON,
                           human_only=True)
     recovered = bootstrap_gate.recover_bootstrap_deadlock(a)
-    assert recovered == ["t1-bootstrap"]
+    assert [e["task_id"] for e in recovered] == ["t1-bootstrap"]
     tasks = {t["id"]: t for t in projstate.load_backlog(a)}
     assert tasks["t1-bootstrap"]["status"] == "pending"
     assert tasks["t1-bootstrap"]["blocking_reason"] is None

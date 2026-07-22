@@ -15,10 +15,11 @@ this module is a deterministic, code-level assertion over the worktree.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 
-from . import gitops
+from . import gitops, projstate
 
 BOOTSTRAP_KIND = "bootstrap"
 TEST_SETUP_KINDS = ("test_setup", "testing_setup", "test_framework")
@@ -26,6 +27,18 @@ TEST_SETUP_KINDS = ("test_setup", "testing_setup", "test_framework")
 NO_CHECKS_BLOCKER_REASON = "no deterministic checks configured"
 NO_CHECKS_HUMAN_REASON = (NO_CHECKS_BLOCKER_REASON +
                           "; configure verification.commands")
+DETERMINISTIC_CHECKS_MISSING_CODE = \
+    projstate.BLOCKER_CODE_DETERMINISTIC_CHECKS_MISSING
+
+# Matches every historical wording/punctuation variant of the pre-fix
+# zero-check deadlock message, on either a task's `blocking_reason` or a
+# blocker's `reason` -- "no deterministic checks configured", "no
+# deterministic checks configured; configure verification.commands",
+# "zero deterministic checks: blocking", etc.
+_LEGACY_DETERMINISTIC_CHECKS_RE = re.compile(
+    r"(no|zero)\s+deterministic\s+checks?\b", re.I)
+
+_TEST_FRAMEWORK_DECISION_RE = re.compile(r"test(ing)?\s*framework", re.I)
 
 CREDENTIAL_PATTERNS = [
     ".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_rsa.*",
@@ -47,26 +60,44 @@ def is_test_setup_task(task):
         TEST_SETUP_KINDS
 
 
-def test_framework_scheduled(backlog):
-    """True once the architecture has committed to a task that installs
-    the test framework -- anywhere in the backlog, regardless of status:
-    that is what "the architecture confirms a test framework is
-    scheduled" means. Business-logic tasks never get this exception
-    merely because such a task doesn't exist yet."""
-    return any(is_test_setup_task(t) for t in backlog or [])
+def decisions_text(agentic_dir):
+    """Flattened text of every recorded architecture decision (still
+    needed AND already decided) -- used as evidence that "the
+    architecture confirms a test framework is scheduled" for projects
+    generated before task `kind` existed (see `test_framework_scheduled`
+    and `recover_bootstrap_deadlock`)."""
+    doc = projstate.read_yaml(agentic_dir, "decisions.yaml",
+                              {"human_decisions_needed": [], "decided": []})
+    parts = list(doc.get("human_decisions_needed") or [])
+    parts += [d.get("decision", "") for d in (doc.get("decided") or [])]
+    return "\n".join(parts)
 
 
-def bootstrap_eligible(task, backlog):
+def test_framework_scheduled(backlog, decisions=""):
+    """True once the architecture has committed to installing a test
+    framework -- either a backlog task explicitly marked `kind:
+    test_setup` (new-style projects), or a recorded decision (needed or
+    already resolved) about which test framework to use (older projects,
+    where that commitment was only ever captured as a human_decision).
+    Business-logic tasks never get this exception merely because neither
+    exists yet."""
+    if any(is_test_setup_task(t) for t in backlog or []):
+        return True
+    return bool(_TEST_FRAMEWORK_DECISION_RE.search(decisions or ""))
+
+
+def bootstrap_eligible(task, backlog, decisions=""):
     """Returns (eligible, reason). Only a task explicitly classified as
-    bootstrap/scaffolding, in a project whose own backlog already commits
-    to a later test-setup task, may substitute structural checks for a
-    test suite. Every other zero-check task blocks exactly as before."""
+    bootstrap/scaffolding, in a project that has committed to a test
+    framework somewhere (see `test_framework_scheduled`), may substitute
+    structural checks for a test suite. Every other zero-check task
+    blocks exactly as before."""
     if not is_bootstrap_task(task):
         return False, "task is not classified as bootstrap/scaffolding"
-    if not test_framework_scheduled(backlog):
-        return False, ("no test-framework task scheduled in the backlog; "
-                       "add one (kind: test_setup) before using the "
-                       "bootstrap exception")
+    if not test_framework_scheduled(backlog, decisions):
+        return False, ("no test-framework commitment on record (backlog "
+                       "task kind: test_setup, or a recorded decision); "
+                       "add one before using the bootstrap exception")
     return True, None
 
 
@@ -310,33 +341,95 @@ def run_structural_checks(task, worktree, log_dir=None):
 
 # -- recovery -------------------------------------------------------------------
 
+def _is_legacy_deterministic_checks_block(task):
+    return bool(_LEGACY_DETERMINISTIC_CHECKS_RE.search(
+        task.get("blocking_reason") or ""))
+
+
+def _earliest_task_id(agentic_dir, backlog):
+    """The task `next_task()` would have picked first, ignoring status --
+    i.e. the project's own initial/scaffolding position. Retroactive
+    bootstrap classification (see `recover_bootstrap_deadlock`) is only
+    ever granted to THIS one task: a business-logic task elsewhere in the
+    backlog that also happens to lack `kind` and also hit the same
+    deadlock (realistic when verification.commands was project-wide
+    empty) must still block -- only the task actually in the scaffolding
+    position gets the retroactive exception."""
+    if not backlog:
+        return None
+    order = projstate.milestone_order(agentic_dir)
+    rank = {m: i for i, m in enumerate(order)}
+
+    def key(t):
+        return (rank.get(t.get("milestone"), len(order)), t["id"])
+
+    return min(backlog, key=key)["id"]
+
+
+def _resolve_deterministic_checks_blockers(agentic_dir, task_id):
+    """Resolve EVERY unresolved blocker recorded for `task_id` that is
+    conclusively the zero-check deadlock -- matched by `code` when
+    present, and by the legacy reason-text pattern otherwise (covers the
+    known duplicate: `fail()` used to write a second, human_only=False
+    blocker with the short reason alongside the explicit human_only=True
+    one). Backfills `code` on legacy records for future dedup. Never
+    touches a blocker for a different task or a different reason."""
+    blockers = projstate.read_yaml(agentic_dir, "blockers.yaml",
+                                   {"blockers": []})
+    resolved = 0
+    for b in blockers.get("blockers", []):
+        if b.get("resolved") or b.get("task") != task_id:
+            continue
+        if b.get("code") == DETERMINISTIC_CHECKS_MISSING_CODE or \
+                _LEGACY_DETERMINISTIC_CHECKS_RE.search(b.get("reason") or ""):
+            b["resolved"] = True
+            b["code"] = DETERMINISTIC_CHECKS_MISSING_CODE
+            resolved += 1
+    if resolved:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers)
+    return resolved
+
+
 def recover_bootstrap_deadlock(agentic_dir):
-    """Self-healing for tasks blocked solely by the pre-fix zero-check
-    deadlock: if a blocked task is bootstrap-eligible under the new rules,
-    make it retryable again. Never marks it done, never touches worktrees
-    -- it only clears the stale block so the next cycle re-attempts the
-    task under the fixed gate."""
-    from . import projstate
+    """Self-healing for tasks blocked solely by the (now-fixed) zero-check
+    deadlock -- including projects created before this fix existed, whose
+    tasks predate the `kind` classification entirely. Never marks a task
+    done, never touches worktrees -- it only clears the stale block (task
+    status/blocking_reason AND every duplicate blocker record for it) so
+    the next cycle re-attempts the task under the fixed gate. Returns one
+    auditable event dict per recovered task."""
     if not projstate.exists(agentic_dir):
         return []
     backlog = projstate.load_backlog(agentic_dir)
-    recovered = [t["id"] for t in backlog
-                if t["status"] == "blocked"
-                and NO_CHECKS_BLOCKER_REASON in (t.get("blocking_reason")
-                                                 or "")
-                and bootstrap_eligible(t, backlog)[0]]
-    for task_id in recovered:
-        projstate.update_task(agentic_dir, task_id, status="pending",
-                              blocking_reason=None)
-    if recovered:
-        blockers = projstate.read_yaml(agentic_dir, "blockers.yaml",
-                                       {"blockers": []})
-        changed = False
-        for b in blockers.get("blockers", []):
-            if b.get("task") in recovered and not b.get("resolved") and \
-                    NO_CHECKS_BLOCKER_REASON in (b.get("reason") or ""):
-                b["resolved"] = True
-                changed = True
-        if changed:
-            projstate.write_yaml(agentic_dir, "blockers.yaml", blockers)
-    return recovered
+    decisions = decisions_text(agentic_dir)
+    earliest_id = _earliest_task_id(agentic_dir, backlog)
+    events = []
+    for task in backlog:
+        if task["status"] != "blocked" or \
+                not _is_legacy_deterministic_checks_block(task):
+            continue
+        eligible, _ = bootstrap_eligible(task, backlog, decisions)
+        retag = False
+        if not eligible and not task.get("kind") and \
+                task["id"] == earliest_id:
+            # a task that predates the `kind` classification entirely,
+            # AND sits in the project's initial/scaffolding position:
+            # probe what eligibility WOULD be if it were retroactively
+            # tagged bootstrap -- only commit the retag if that actually
+            # clears the bar (a recorded test-framework commitment still
+            # has to exist somewhere; this never rescues a task that
+            # simply has no evidence of one)
+            probe = dict(task, kind=BOOTSTRAP_KIND)
+            eligible, _ = bootstrap_eligible(probe, backlog, decisions)
+            retag = eligible
+        if not eligible:
+            continue
+        fields = {"status": "pending", "blocking_reason": None}
+        if retag:
+            fields["kind"] = BOOTSTRAP_KIND
+        projstate.update_task(agentic_dir, task["id"], **fields)
+        resolved = _resolve_deterministic_checks_blockers(agentic_dir,
+                                                           task["id"])
+        events.append({"task_id": task["id"], "retagged_kind": retag,
+                       "resolved_blockers": resolved})
+    return events
