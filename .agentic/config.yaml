@@ -295,13 +295,40 @@ backends:
     model: null              # selected during setup from installed models
     api_key_required: false
     cost_free: true
+    # Native /api/chat runtime options (Ollama's own, not an OpenAI-shaped
+    # request). Global defaults; override per role below. num_ctx here is
+    # only a fallback -- the real call always picks a dynamic context tier
+    # sized from the actual Context Package (see max_context_tokens).
+    options:
+      num_ctx: 32768
+      num_predict: 4096
+      temperature: 0.2
+    options_by_role: {}       # e.g. {architect: {num_predict: 8192}}
+    # Dynamic context sizing: required_context = input_estimate (from the
+    # actual rendered prompt) + output_reserve (num_predict) + safety
+    # margin, rounded up to the smallest tier below, capped at
+    # max_context_tokens -- the admin-configured machine-capacity ceiling
+    # (this platform never auto-detects RAM; the ceiling IS the check).
+    context_tiers: [8192, 16384, 32768, 65536]
+    max_context_tokens: 32768          # this machine's starting ceiling
+    context_safety_margin_tokens: 1024
+    keep_alive_minutes: 30             # unload sooner via `models unload`
+    # architect/reviewer get light reasoning; workers execute directly.
+    # Falls back to a boolean automatically if the installed model/API
+    # doesn't support string thinking levels (see providers/ollama.py).
+    thinking:
+      architect: low
+      worker: false
+      reviewer: low
     # Local models can need substantial cold-start time to load; these are
     # separate from execution.command_timeout_seconds (which still governs
-    # Codex/Claude/API backends unchanged) so tuning Ollama never affects them.
+    # Codex/Claude/API backends unchanged) so tuning Ollama never affects
+    # them. Enforced per-stage by the native streaming transport itself.
     connect_timeout_seconds: 10
+    model_load_timeout_seconds: 600
     first_token_timeout_seconds: 300
-    total_timeout_seconds: 900
-    cold_start_grace_seconds: 300
+    idle_stream_timeout_seconds: 180
+    total_timeout_seconds: 1800
   # API backends reference the providers section; enable by assigning a model:
   # openai_api:  {type: api, provider: openai, model: your-model}
   # claude_api:  {type: api, provider: anthropic, model: your-model}

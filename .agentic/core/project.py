@@ -13,7 +13,8 @@ import json
 import os
 import re
 
-from . import backends, capacity as capacity_mod, config as config_mod
+from . import backends, bootstrap_gate, capacity as capacity_mod
+from . import config as config_mod
 from . import errors, gate, gitops, logs, notify, projstate
 from .breaker import BreakerBoard
 from .orchestrator import (apply_edits, load_prompt, _schema, _snapshot)
@@ -356,6 +357,13 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                  "worktrees": abandoned})
     except Exception:   # noqa: BLE001 — recovery is best-effort
         pass
+    try:   # self-heal tasks stuck on the pre-fix zero-check deadlock
+        recovered = bootstrap_gate.recover_bootstrap_deadlock(a)
+        if recovered:
+            log({"event": "bootstrap_deadlock_recovered", "run_id": run_id,
+                 "tasks": recovered})
+    except Exception:   # noqa: BLE001 — recovery is best-effort
+        pass
 
     task = projstate.next_task(a)
     if task is None:
@@ -541,14 +549,34 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                                       os.path.join(run_dir,
                                                    "checks-%d" % coder_calls))
         if gate_result["no_checks"]:
-            _revert_worktree(worktree)
-            projstate.add_blocker(a, task["id"],
-                                  "no deterministic checks configured; "
-                                  "configure verification.commands",
-                                  human_only=True)
-            return fail("failure", "zero deterministic checks: blocking",
-                        block=True,
-                        blocking_reason="no deterministic checks configured")
+            # "no checks configured" is NEVER a pass -- but a task the
+            # architect itself classified as bootstrap/scaffolding, in a
+            # project whose backlog already commits to a later test-setup
+            # task, gets a deterministic structural gate instead of an
+            # instant block. Its result is folded into the SAME repair
+            # loop below (never a bare pass): it reports
+            # tests=not_configured_yet, never tests=passed, and any
+            # failure gets the normal repair attempts before blocking --
+            # generated work is no longer discarded on first contact.
+            eligible, reason = bootstrap_gate.bootstrap_eligible(
+                task, projstate.load_backlog(a))
+            if eligible:
+                gate_result = bootstrap_gate.run_structural_checks(
+                    task, worktree,
+                    os.path.join(run_dir,
+                                 "checks-%d-bootstrap" % coder_calls))
+                log({"event": "bootstrap_structural_gate", "run_id": run_id,
+                     "task_id": task["id"], "ok": gate_result["ok"],
+                     "tests": gate_result["tests"]})
+            else:
+                _revert_worktree(worktree)
+                projstate.add_blocker(
+                    a, task["id"], bootstrap_gate.NO_CHECKS_HUMAN_REASON,
+                    human_only=True)
+                return fail(
+                    "failure", "zero deterministic checks: blocking",
+                    block=True,
+                    blocking_reason=bootstrap_gate.NO_CHECKS_BLOCKER_REASON)
         if not gate_result["ok"]:
             failing = [r for r in gate_result["results"]
                        if r["mandatory"] and not r["passed"]]
@@ -670,9 +698,12 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     projstate.update_task(a, task["id"], status="done",
                           attempts=task["attempts"] + 1, last_result="pass",
                           blocking_reason=None)
+    complete_detail = "task %s complete" % task["id"]
+    if gate_result.get("bootstrap_mode"):
+        complete_detail += " (tests: not_configured_yet — structural gate)"
     result = _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task,
                            used_backend, "success", total_tokens, started_at,
-                           "task %s complete" % task["id"])
+                           complete_detail)
     milestone = task.get("milestone")
     progress = result["progress"]
     if milestone and progress["milestones"].get(milestone) == "done":
@@ -876,6 +907,7 @@ def _review_input(order, worktree, gate_result, task=None):
             "diff": redact(gitops.diff_text(worktree)),
             "deterministic_checks": {
                 "ok": gate_result["ok"],
+                "tests": gate_result.get("tests", "not_configured_yet"),
                 "results": [{k: r[k] for k in ("name", "passed", "mandatory")}
                             for r in gate_result["results"]]}}
 
@@ -1030,6 +1062,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     update_knowledge(cfg, a, log)
     if complete:
         scheduler.mark_complete()
+        _unload_local_models_safe(cfg, log)
         notify.notify(cfg, "project_complete", "Application ready for review",
                       "All audits passed. Review branch %s and merge when "
                       "satisfied." % PROJECT_BRANCH, p["memory"])
@@ -1037,6 +1070,25 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     scheduler.set_project_status("audit_failed")
     return {"status": "audit_failed",
             "failed_checks": [k for k, v in checks.items() if not v]}
+
+
+def _unload_local_models_safe(cfg, log):
+    """Best-effort: release any configured local (Ollama) model's memory
+    once a project completes -- one of the documented unload triggers
+    (project completes / memory pressure / another local model needed /
+    user request). Never able to affect the completion result itself."""
+    for name, bcfg in (cfg.get("backends") or {}).items():
+        if (bcfg or {}).get("type") != "local":
+            continue
+        try:
+            adapter = backends.build_backend(cfg, name)
+            if hasattr(adapter, "unload"):
+                result = adapter.unload("project_complete")
+                log({"event": "local_model_unloaded", "backend": name,
+                     "ok": result.get("ok")})
+        except Exception as exc:   # noqa: BLE001
+            log({"event": "local_model_unload_failed", "backend": name,
+                 "detail": str(exc)[:200]})
 
 
 def _needs_env(worktree):

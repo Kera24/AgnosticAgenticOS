@@ -776,7 +776,12 @@ def cmd_plugin(cfg, args):
 
 
 def cmd_models(cfg, args):
-    """models list|refresh|resolve <alias>|select <role> [risk]|capacity
+    """models list|refresh|resolve <alias>|select <role> [risk]|capacity|
+    unload <backend>
+
+    `unload <backend>` forces a local model (e.g. Ollama) to release
+    memory now (keep_alive: 0) -- user-requested unload; project
+    completion also does this automatically (see final_audit).
 
     Model Capability Registry (Phase 8) + Hierarchical Orchestration
     (Phase 9): a dynamic per-machine catalogue of what models are
@@ -839,8 +844,21 @@ def cmd_models(cfg, args):
             task_risk=extra[1] if len(extra) > 1 else "medium")
         _print(decision)
         return 0 if decision["ok"] else 1
+    if sub == "unload":
+        if not extra:
+            print("usage: models unload <backend>", file=sys.stderr)
+            return 2
+        from core.backends import build_backend
+        backend = build_backend(cfg, extra[0])
+        if not hasattr(backend, "unload"):
+            print("backend %r does not support unload" % extra[0],
+                 file=sys.stderr)
+            return 2
+        result = backend.unload("user_requested")
+        _print(result)
+        return 0 if result["ok"] else 1
     print("usage: models list|refresh|resolve <alias>|select <role> "
-         "[risk]|capacity", file=sys.stderr)
+         "[risk]|capacity|unload <backend>", file=sys.stderr)
     return 2
 
 

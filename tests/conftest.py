@@ -50,6 +50,44 @@ class Transport:
         raise AssertionError("fake transport ran out of scripted responses")
 
 
+class OllamaStream:
+    """Scripted fake for the native Ollama streaming transport
+    (providers.ollama.default_stream_transport's shape): one call ->
+    one iterator of NDJSON-shaped event dicts. An Exception instance
+    anywhere in a script is raised mid-stream (after any events before
+    it are yielded) -- lets a test simulate a timeout/error partway
+    through generation, never a real socket."""
+
+    def __init__(self, call_scripts):
+        self.scripts = list(call_scripts)
+        self.calls = []
+
+    def __call__(self, url, headers, body, timeouts):
+        self.calls.append({"url": url, "headers": headers,
+                           "body": json.loads(body.decode("utf-8")),
+                           "timeouts": timeouts})
+        script = self.scripts.pop(0) if self.scripts else []
+
+        def gen():
+            for item in script:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        return gen()
+
+
+def ollama_event(content=None, thinking=None, done=False, **extra):
+    """One native Ollama /api/chat NDJSON stream event."""
+    message = {}
+    if thinking is not None:
+        message["thinking"] = thinking
+    if content is not None:
+        message["content"] = content
+    event = {"message": message, "done": done}
+    event.update(extra)
+    return event
+
+
 @pytest.fixture
 def base_cfg():
     return copy.deepcopy({

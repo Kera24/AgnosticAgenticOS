@@ -36,7 +36,7 @@ def test_provider_selection_by_type():
 def test_ollama_defaults_keyless_and_costfree():
     p = providers.build("ollama", {"type": "ollama"})
     assert p.cost_free
-    assert p.base_url() == "http://localhost:11434/v1"
+    assert p.base_url() == "http://localhost:11434"   # native /api/chat
 
 
 # 2. role-based model selection ----------------------------------------------

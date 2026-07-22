@@ -58,6 +58,19 @@ def changed_files(worktree):
     return [line.strip().replace("\\", "/") for line in out.splitlines() if line.strip()]
 
 
+def changed_files_with_status(worktree):
+    """[(path, status), ...] from the staged diff, e.g. [("src/a.py", "M")].
+    Status is git's raw letter (A/M/D/R100/...) -- callers that only care
+    about deletions should check `status.startswith("D")`."""
+    out = run_git(["diff", "--cached", "--name-status"], cwd=worktree)
+    pairs = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            pairs.append((parts[-1].strip().replace("\\", "/"), parts[0].strip()))
+    return pairs
+
+
 def changed_lines(worktree):
     out = run_git(["diff", "--cached", "--numstat"], cwd=worktree)
     total = 0

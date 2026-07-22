@@ -9,6 +9,29 @@ import os
 
 from . import execpolicy
 
+# Deterministic-check classification (bootstrap fix): every check result is
+# tagged with exactly one of these kinds so callers can tell "a real test
+# suite ran and passed" apart from every other flavour of deterministic
+# evidence (build/lint/typecheck/syntax/structural/security/isolation).
+CHECK_KINDS = ("test_suite", "build", "typecheck", "lint", "syntax",
+              "structural", "security", "project_isolation")
+
+
+def classify_check_kind(name, command):
+    """Best-effort classification of a configured/detected check. An
+    explicit `kind` on the check dict always wins (see `run_checks`); this
+    is only the fallback for checks that don't declare one."""
+    name_l = (name or "").lower()
+    cmd_l = str(command or "").lower()
+    if "lint" in name_l:
+        return "lint"
+    if "typecheck" in name_l or "tsc" in cmd_l or "mypy" in cmd_l:
+        return "typecheck"
+    if "build" in name_l:
+        return "build"
+    return "test_suite"   # the historical default: verification.commands
+                          # has always meant "the test suite" unless labeled
+
 
 def detect_commands(repo_root):
     """Best-effort autodetection of repository checks."""
@@ -17,24 +40,26 @@ def detect_commands(repo_root):
     if (exists("pyproject.toml") or exists("pytest.ini") or exists("setup.cfg")
             or exists("tests")):
         commands.append({"name": "pytest", "command": "python -m pytest -q",
-                         "mandatory": True})
+                         "mandatory": True, "kind": "test_suite"})
     if exists("package.json"):
         try:
             with open(os.path.join(repo_root, "package.json"), encoding="utf-8") as fh:
                 scripts = (json.load(fh).get("scripts") or {})
         except ValueError:
             scripts = {}
+        script_kind = {"lint": "lint", "test": "test_suite", "build": "build"}
         for script in ("lint", "test", "build"):
             if script in scripts:
                 commands.append({"name": "npm-%s" % script,
                                  "command": "npm run %s --silent" % script,
-                                 "mandatory": script != "lint"})
+                                 "mandatory": script != "lint",
+                                 "kind": script_kind[script]})
     if exists("Cargo.toml"):
         commands.append({"name": "cargo-test", "command": "cargo test --quiet",
-                         "mandatory": True})
+                         "mandatory": True, "kind": "test_suite"})
     if exists("go.mod"):
         commands.append({"name": "go-test", "command": "go test ./...",
-                         "mandatory": True})
+                         "mandatory": True, "kind": "test_suite"})
     return commands
 
 
@@ -75,7 +100,7 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
     commands, auto = resolve_commands(cfg, workdir)
     if not commands:
         return {"ok": False, "auto_detected": auto, "results": [],
-                "no_checks": True,
+                "no_checks": True, "tests": "not_configured_yet",
                 "reason": "no deterministic checks configured or detected; "
                           "configure verification.commands"}
     timeout = timeout or int(cfg.get("execution", {})
@@ -85,9 +110,10 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
     for check in commands:
         name = check["name"]
         mandatory = bool(check.get("mandatory", True))
+        kind = check.get("kind") or classify_check_kind(name, check["command"])
         record = {"name": name, "command": check["command"],
                   "mandatory": mandatory, "passed": False, "exit_code": None,
-                  "detail": ""}
+                  "detail": "", "kind": kind}
         run = execpolicy.run_command(
             check["command"], cwd=workdir, timeout=timeout,
             shell_required=bool(check.get("shell_required", False)),
@@ -108,8 +134,12 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
             ok = False
             if fail_fast:
                 break
+    test_suite_results = [r for r in results if r["kind"] == "test_suite"]
+    tests = ("passed" if test_suite_results and all(
+                r["passed"] for r in test_suite_results)
+             else "failed" if test_suite_results else "not_configured_yet")
     return {"ok": ok, "auto_detected": auto, "results": results,
-            "no_checks": False}
+            "no_checks": False, "tests": tests}
 
 
 def evaluate_against_baseline(agentic_dir, gate):

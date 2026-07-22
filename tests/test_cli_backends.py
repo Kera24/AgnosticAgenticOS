@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from conftest import FakeRunner, Transport, oai_body
+from conftest import FakeRunner, OllamaStream, Transport, oai_body, ollama_event
 from core import errors
 from providers.cli_base import (FORBIDDEN_COMMAND_TOKENS, classify_cli_failure,
                                 parse_retry_hint, validate_cli_command)
@@ -577,15 +577,17 @@ def test_ollama_backend_requires_selected_model():
 
 
 def test_ollama_backend_invokes_local_model():
-    transport = Transport([(200, oai_body("local says hi"))])
+    stream = OllamaStream([[ollama_event(content="local says hi", done=True,
+                                        eval_count=3)]])
     backend = OllamaLocalBackend(
-        "ollama", {"model": "llama3:8b"}, transport=transport,
+        "ollama", {"model": "llama3:8b"}, transport=stream,
         runner=_ollama_list_runner(["llama3:8b", "qwen3.5:latest"]),
         which=lambda b: "C:/bin/ollama")
     result = backend.invoke("coder", "x", None, ".", "write", 30)
     assert result["ok"] and result["backend_type"] == "local"
+    assert result["content"] == "local says hi"
     assert result["estimated_cost_usd"] == 0.0
-    assert transport.calls[0]["url"].startswith("http://localhost:11434")
+    assert stream.calls[0]["url"].startswith("http://localhost:11434")
 
 
 # -- central model resolution: Ollama ----------------------------------------------------
@@ -593,16 +595,17 @@ def test_ollama_selected_qwen_model_is_used():
     """#8: the configured, installed model is sent to the HTTP endpoint
     unchanged -- this is the exact machine setup from the confirmed bug
     report (routing fallback: ollama, selected model qwen3.5:latest)."""
-    transport = Transport([(200, oai_body("hello from qwen"))])
+    stream = OllamaStream([[ollama_event(content="hello from qwen",
+                                        done=True)]])
     backend = OllamaLocalBackend(
-        "ollama", {"model": "qwen3.5:latest"}, transport=transport,
+        "ollama", {"model": "qwen3.5:latest"}, transport=stream,
         runner=_ollama_list_runner(["qwen3.5:latest", "llama3:8b"]),
         which=lambda b: "C:/bin/ollama")
     result = backend.invoke("architect", "x", None, ".", "read", 30)
     assert result["ok"]
     assert backend.last_model_resolution["resolved_model"] == "qwen3.5:latest"
     assert backend.last_model_resolution["model_flag_emitted"] is True
-    assert transport.calls[0]["body"].get("model") == "qwen3.5:latest"
+    assert stream.calls[0]["body"].get("model") == "qwen3.5:latest"
 
 
 def test_ollama_rejects_embedding_only_model():

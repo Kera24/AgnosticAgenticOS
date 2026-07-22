@@ -24,6 +24,10 @@ TASK_DEFAULTS = {
     "status": "pending",          # pending|in_progress|done|blocked|abandoned
     "attempts": 0, "replans": 0, "last_result": None, "blocking_reason": None,
     "skill": None,
+    # "bootstrap" (scaffolding, no test framework yet), "test_setup" (the
+    # task that introduces the test framework), or unset for ordinary
+    # feature/business-logic work -- see core.bootstrap_gate.
+    "kind": None,
 }
 
 FILES = ["PROJECT.md", "architecture.md", "acceptance-criteria.yaml",

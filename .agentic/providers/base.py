@@ -11,12 +11,15 @@ Every adapter returns the same dict shape regardless of vendor:
 An HTTP 200 is never treated as success by itself — bodies are validated and
 failure modes mapped onto the typed errors in core.errors.
 """
+import http.client
 import json
 import os
 import re
 import socket
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -62,6 +65,102 @@ def default_transport(url, headers, body, timeout):
         if isinstance(getattr(exc, "reason", None), (socket.timeout, TimeoutError)):
             raise errors.TimeoutError_("transport timeout: %s" % exc.reason)
         raise errors.ProviderError("connection failed: %s" % exc.reason)
+
+
+def default_stream_transport(url, headers, body, timeouts):
+    """Streaming counterpart of `default_transport` (used by
+    `providers.ollama`): `http.client` rather than `urllib`, since direct
+    socket access is what lets each phase (connect / model-load /
+    first-token / idle-stream / total) apply its own timeout instead of one
+    flat per-connection value. Kept in this module -- the single choke
+    point for network calls, same as `default_transport` -- rather than in
+    the ollama-specific module, so that invariant never has to special-case
+    a second file. Returns a generator of parsed NDJSON event dicts; raises
+    a stage-labelled `errors.TimeoutError_` (with `.diagnostic` set) if the
+    model never responds in time at whichever phase the budget expires, or
+    `errors.ProviderError` for a non-200 response."""
+    parsed = urllib.parse.urlsplit(url)
+    conn_cls = (http.client.HTTPSConnection if parsed.scheme == "https"
+               else http.client.HTTPConnection)
+    started = time.time()
+    conn = conn_cls(parsed.hostname, parsed.port,
+                    timeout=timeouts["connect_timeout_seconds"])
+    try:
+        conn.connect()
+    except (socket.timeout, OSError) as exc:
+        err = errors.TimeoutError_("ollama connect timeout: %s" % exc)
+        err.diagnostic = ["ollama_timeout_stage=connect"]
+        raise err from exc
+
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    conn.sock.settimeout(timeouts["model_load_timeout_seconds"])
+    try:
+        conn.request("POST", path, body=body, headers=headers)
+        resp = conn.getresponse()
+    except socket.timeout as exc:
+        conn.close()
+        elapsed = round(time.time() - started, 1)
+        err = errors.TimeoutError_(
+            "ollama model-load timeout after %.1fs" % elapsed)
+        err.diagnostic = ["ollama_timeout_stage=model_load",
+                          "ollama_elapsed_seconds=%s" % elapsed]
+        raise err from exc
+    if resp.status != 200:
+        text = resp.read().decode("utf-8", "replace")
+        conn.close()
+        raise errors.ProviderError("ollama HTTP %d: %s"
+                                   % (resp.status, text[:300]))
+
+    def events():
+        seen_any_event = False
+        seen_content = False
+        try:
+            while True:
+                elapsed = time.time() - started
+                remaining_total = timeouts["total_timeout_seconds"] - elapsed
+                if remaining_total <= 0:
+                    err = errors.TimeoutError_(
+                        "ollama total timeout after %.1fs" % elapsed)
+                    err.diagnostic = ["ollama_timeout_stage=total",
+                                      "ollama_elapsed_seconds=%s" % elapsed]
+                    raise err
+                if not seen_any_event:
+                    stage = "model_load"
+                    stage_budget = timeouts["model_load_timeout_seconds"]
+                elif not seen_content:
+                    stage = "first_token"
+                    stage_budget = timeouts["first_token_timeout_seconds"]
+                else:
+                    stage = "idle_stream"
+                    stage_budget = timeouts["idle_stream_timeout_seconds"]
+                conn.sock.settimeout(max(0.1, min(stage_budget,
+                                                  remaining_total)))
+                try:
+                    line = resp.readline()
+                except socket.timeout:
+                    err = errors.TimeoutError_(
+                        "ollama %s timeout after %.1fs" % (stage, elapsed))
+                    err.diagnostic = ["ollama_timeout_stage=%s" % stage,
+                                      "ollama_elapsed_seconds=%s" % elapsed]
+                    raise err
+                if not line:
+                    break
+                line = line.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                event = json.loads(line)
+                seen_any_event = True
+                # a valid stream event -- the next loop iteration
+                # recomputes elapsed/stage fresh, effectively resetting
+                # the idle-stream clock
+                if (event.get("message") or {}).get("content"):
+                    seen_content = True
+                yield event
+        finally:
+            conn.close()
+    return events()
 
 
 class BaseProvider:

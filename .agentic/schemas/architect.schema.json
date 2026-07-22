@@ -40,7 +40,9 @@
                                   "items": {"type": "string"}},
           "deterministic_checks": {"type": "array",
                                    "items": {"type": "string"}},
-          "skill": {"type": ["string", "null"]}
+          "skill": {"type": ["string", "null"]},
+          "kind": {"type": "string",
+                   "description": "Optional: 'bootstrap' for scaffolding tasks with no test framework yet, 'test_setup' for the task that installs it. Unset for ordinary feature/business-logic tasks."}
         }
       }
     },

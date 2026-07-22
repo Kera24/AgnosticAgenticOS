@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from conftest import FakeRunner, Transport, oai_body
+from conftest import FakeRunner, OllamaStream, Transport, oai_body, ollama_event
 from core import errors
 from core.modelres import is_embedding_model, is_placeholder_model, resolve_model
 
@@ -309,8 +309,8 @@ def test_project_start_fallback_from_codex_rebuilds_context_for_ollama(
         {"stdout": "ollama version 0.5.7"},                     # --version
         {"stdout": "NAME  ID  SIZE\nqwen3.5:latest  x  1GB\n"},  # list
     ])
-    transport = Transport([(200, oai_body(
-        json.dumps(ARCHITECT_PAYLOAD), model="qwen3.5:latest"))])
+    transport = OllamaStream([[ollama_event(
+        content=json.dumps(ARCHITECT_PAYLOAD), done=True)]])
     which = lambda b: "C:/bin/%s" % b   # noqa: E731
     result = project_start(cfg, str(plan),
                            overrides={"primary": "codex",

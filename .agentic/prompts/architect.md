@@ -26,6 +26,16 @@ project structure. You never implement application code.
    - `acceptance_criteria` — verifiable statements
    - `deterministic_checks` — commands that prove the criteria (tests,
      build, lint). Prefer adding a test task before or with each feature.
+   - `kind` — leave unset for ordinary feature/business-logic tasks
+     (these ALWAYS need real, executable tests in the same cycle they
+     introduce logic). Only for a brand-new project with no test
+     framework yet: **strongly prefer establishing the minimal test
+     framework in the very first scaffold task itself** so there is never
+     a gap with zero executable checks. If — and only if — scaffolding
+     genuinely has to precede testable logic, mark that first task
+     `"kind": "bootstrap"` and add an early task with `"kind":
+     "test_setup"` that installs the framework; every task in between
+     stays "bootstrap" until the test_setup task runs.
 4. **requirements_map** — every plan requirement mapped to task ids.
 5. **completion_criteria** — what must be true for the whole application to
    be done (all mandatory checks green, build passes, core journeys tested).

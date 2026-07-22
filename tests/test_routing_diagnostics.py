@@ -9,12 +9,13 @@ timeouts + cold-start detection, generation-model filtering, and the
 UTF-8 stdin/stdout fix itself. No live provider/network call anywhere."""
 import json
 
-from conftest import Clock, FakeRunner, Transport, oai_body
+from conftest import (Clock, FakeRunner, OllamaStream, Transport, oai_body,
+                      ollama_event)
 from core import errors, execpolicy
 from core.backends import invoke_backend, routing_chain
 from core.breaker import BreakerBoard
 from core.capacity import CapacityLedger
-from providers.local_ollama import (OllamaLocalBackend, ollama_timeout_config)
+from providers.local_ollama import OllamaLocalBackend
 
 
 def make_env(base_cfg, tmp_path):
@@ -34,20 +35,6 @@ def codex_and_ollama_cfg(cfg, *, ollama_model="qwen3.5:latest",
     cfg["routing"] = {"mode": "simple", "primary": "codex",
                       "fallbacks": ["ollama"]}
     return cfg
-
-
-def _ollama_running(models_warm=()):
-    """Scripted FakeRunner responses for detect() (--version, list) +
-    loaded_models() (ps), in the order OllamaLocalBackend.invoke() makes
-    them."""
-    header = "NAME  ID  SIZE\n"
-    installed = "qwen3.5:latest  x  1GB\n"
-    warm_rows = "\n".join("%s  x  1GB" % m for m in models_warm)
-    return FakeRunner([
-        {"stdout": "ollama version 0.5.7"},
-        {"stdout": header + installed},
-        {"stdout": header + warm_rows},
-    ])
 
 
 CODEX_OK = json.dumps({"type": "item.completed",
@@ -135,12 +122,12 @@ def test_recoverable_codex_failure_invokes_ollama_fallback(base_cfg, tmp_path):
         {"exit_code": 1, "stderr": "transient codex failure"},
         {"stdout": "ollama version 0.5.7"},
         {"stdout": "NAME  ID  SIZE\nqwen3.5:latest  x  1GB\n"},
-        {"stdout": "NAME  ID  SIZE\n"},
     ])
-    transport = Transport([(200, oai_body("architected by ollama"))])
+    stream = OllamaStream([[ollama_event(content="architected by ollama",
+                                        done=True)]])
     result = invoke_backend(base_cfg, "codex", "architect", "p",
                             fallback_chain=["ollama"], ledger=ledger,
-                            board=board, runner=runner, transport=transport,
+                            board=board, runner=runner, transport=stream,
                             which=lambda b: "x")
     assert result["ok"] and result["backend"] == "ollama"
     assert result["content"] == "architected by ollama"
@@ -194,13 +181,12 @@ def test_complete_routing_attempts_when_primary_is_breaker_blocked(
     runner = FakeRunner([
         {"stdout": "ollama version 0.5.7"},
         {"stdout": "NAME  ID  SIZE\nqwen3.5:latest  x  1GB\n"},
-        {"stdout": "NAME  ID  SIZE\n"},
     ])
-    transport = Transport([errors.TimeoutError_("transport timeout: "
-                                                "timed out")])
+    stream = OllamaStream([[errors.TimeoutError_(
+        "ollama total timeout after 1800.0s")]])
     result = invoke_backend(base_cfg, "codex", "architect", "p",
                             fallback_chain=["ollama"], ledger=ledger,
-                            board=board, runner=runner, transport=transport,
+                            board=board, runner=runner, transport=stream,
                             which=lambda b: "x")
     assert result["ok"] is False
     attempts = {a["backend"]: a for a in result["routing_attempts"]}
@@ -214,70 +200,9 @@ def test_complete_routing_attempts_when_primary_is_breaker_blocked(
     assert attempts["ollama"]["result"] == "failure"
 
 
-# -- 10/12/13. Ollama timeouts + generation-model filtering ------------------------------
-
-def test_ollama_timeout_config_defaults_and_overrides():
-    defaults = ollama_timeout_config({"type": "local", "model": "x"})
-    assert defaults == {"connect_timeout_seconds": 10,
-                        "first_token_timeout_seconds": 300,
-                        "total_timeout_seconds": 900,
-                        "cold_start_grace_seconds": 300}
-    overridden = ollama_timeout_config({"type": "local", "model": "x",
-                                       "total_timeout_seconds": 1800})
-    assert overridden["total_timeout_seconds"] == 1800
-    assert overridden["cold_start_grace_seconds"] == 300   # untouched
-
-
-def test_ollama_cold_start_gets_grace_period_added_to_timeout(tmp_path):
-    """A model NOT already warm (per `ollama ps`) gets total_timeout_seconds
-    + cold_start_grace_seconds, never the bare total alone."""
-    backend = OllamaLocalBackend(
-        "ollama", {"model": "qwen3.5:latest"}, transport=Transport([
-            errors.TimeoutError_("transport timeout: timed out")]),
-        runner=_ollama_running(models_warm=()),   # nothing warm: cold
-        which=lambda b: "C:/bin/ollama")
-    try:
-        backend.invoke("architect", "p", None, ".", "read", 30)
-        assert False, "expected a TimeoutError_"
-    except errors.TimeoutError_ as exc:
-        diag = dict(k.split("=", 1) for k in exc.diagnostic)
-        assert diag["ollama_timeout_stage"] == "cold_start"
-        assert diag["ollama_warm_before_call"] == "false"
-        assert diag["ollama_effective_timeout_seconds"] == "1200"   # 900+300
-
-
-def test_ollama_warm_model_uses_bare_total_timeout(tmp_path):
-    backend = OllamaLocalBackend(
-        "ollama", {"model": "qwen3.5:latest"}, transport=Transport([
-            errors.TimeoutError_("transport timeout: timed out")]),
-        runner=_ollama_running(models_warm=("qwen3.5:latest",)),
-        which=lambda b: "C:/bin/ollama")
-    try:
-        backend.invoke("architect", "p", None, ".", "read", 30)
-        assert False, "expected a TimeoutError_"
-    except errors.TimeoutError_ as exc:
-        diag = dict(k.split("=", 1) for k in exc.diagnostic)
-        assert diag["ollama_timeout_stage"] == "generation"
-        assert diag["ollama_warm_before_call"] == "true"
-        assert diag["ollama_effective_timeout_seconds"] == "900"
-
-
-def test_ollama_configured_total_timeout_is_respected(tmp_path):
-    """`backends.ollama.total_timeout_seconds` is genuinely used, not just
-    accepted -- overriding it changes the effective budget."""
-    backend = OllamaLocalBackend(
-        "ollama", {"model": "qwen3.5:latest", "total_timeout_seconds": 60,
-                  "cold_start_grace_seconds": 0},
-        transport=Transport([errors.TimeoutError_("timed out")]),
-        runner=_ollama_running(models_warm=("qwen3.5:latest",)),
-        which=lambda b: "C:/bin/ollama")
-    try:
-        backend.invoke("architect", "p", None, ".", "read", 30)
-        assert False, "expected a TimeoutError_"
-    except errors.TimeoutError_ as exc:
-        diag = dict(k.split("=", 1) for k in exc.diagnostic)
-        assert diag["ollama_effective_timeout_seconds"] == "60"
-
+# -- 13. generation-model filtering (5-stage timeout model + native
+# streaming, context sizing, keep_alive, thinking, unload: see
+# tests/test_ollama_native.py) -----------------------------------------------
 
 def test_ollama_never_selects_embedding_model_as_generation_worker(tmp_path):
     """#14 of the spec: nomic-embed-text-v2-moe (or any embedding model)

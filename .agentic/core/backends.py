@@ -323,6 +323,9 @@ def invoke_backend(cfg, backend_name, agent_role, prompt, input_data=None,
         usage = _fill_usage(result, prompt)
         ledger.record_call(name, agent_role, ok=True, usage=usage,
                            duration_seconds=duration)
+        if result.get("telemetry"):
+            log({"event": "backend_telemetry", "backend": name,
+                 "role": agent_role, "telemetry": result["telemetry"]})
 
         if result.get("refusal"):
             # A refusal is a safety decision; fallback never bypasses it.
