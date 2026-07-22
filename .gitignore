@@ -11,6 +11,18 @@
 # agentic runtime artefacts (may contain repo snapshots / prompts)
 .agentic/runs/
 .agentic/worktrees/
+
+# blanket rule: EVERY file under .agentic/memory/ is machine-local runtime
+# state (auth verification, model registry, credentials/tokens/sessions,
+# decision logs, capacity/usage ledgers, ...) and must never enter the
+# index or a distributable package -- only the template README ships in
+# git. New runtime artefacts (like auth-verification.json/
+# model-registry.json) are covered automatically without needing a new
+# .gitignore line each time; the itemised rules below are kept only for
+# documentation and are otherwise redundant with this one.
+.agentic/memory/*
+!.agentic/memory/README.md
+
 .agentic/memory/disagreements.json
 .agentic/memory/baseline.json
 .agentic/memory/backends.json
