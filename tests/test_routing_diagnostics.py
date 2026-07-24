@@ -233,10 +233,11 @@ def test_ollama_does_not_apply_its_long_timeout_to_codex(base_cfg, tmp_path):
     calls = []
 
     class RecordingRunner(FakeRunner):
-        def __call__(self, argv, cwd=None, timeout=120, stdin_text=None):
+        def __call__(self, argv, cwd=None, timeout=120, stdin_text=None,
+                     **kw):
             calls.append(timeout)
             return super().__call__(argv, cwd=cwd, timeout=timeout,
-                                    stdin_text=stdin_text)
+                                    stdin_text=stdin_text, **kw)
 
     runner = RecordingRunner([{"stdout": CODEX_OK}])
     invoke_backend(base_cfg, "codex", "architect", "p", ledger=ledger,

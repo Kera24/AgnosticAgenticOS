@@ -13,7 +13,7 @@ import re
 import shutil
 
 from core import errors
-from core import execpolicy
+from core import supervisor
 from core.jsonx import extract_first_json
 
 # Any configured CLI command containing one of these is refused outright.
@@ -109,9 +109,16 @@ class CLIBackendBase:
         self.cost_free = True  # subscription/local: no per-token USD cost
 
     @staticmethod
-    def _default_runner(argv, cwd=None, timeout=120, stdin_text=None):
-        return execpolicy.run_command(argv, cwd=cwd or ".", timeout=timeout,
-                                      source="config", stdin_text=stdin_text)
+    def _default_runner(argv, cwd=None, timeout=120, stdin_text=None,
+                        **kw):
+        # supervised: never the old subprocess.run(timeout=...) path,
+        # which cannot enforce its own deadline once a CLI spawns a
+        # descendant that inherits its stdout/stderr pipe handles (see
+        # core/supervisor.py's module docstring for the live incident
+        # this fixes).
+        return supervisor.default_cli_runner(argv, cwd=cwd or ".",
+                                             timeout=timeout,
+                                             stdin_text=stdin_text, **kw)
 
     def binary(self):
         return self.cfg.get("binary", self.name)

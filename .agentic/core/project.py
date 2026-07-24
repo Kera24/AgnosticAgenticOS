@@ -19,6 +19,7 @@ from . import decision_policy, execengine, failures
 from . import inventory as inventory_mod
 from . import parallel as parallel_mod
 from . import preflight as preflight_mod
+from . import supervisor as supervisor_mod
 from . import errors, gate, gitops, logs, notify, projstate
 from .breaker import BreakerBoard
 from .orchestrator import (apply_edits, load_prompt, _schema, _snapshot)
@@ -145,6 +146,79 @@ def _context(cfg, memory, ledger=None, board=None, overrides=None,
     caller = caller or make_caller(cfg, ledger, board, overrides=overrides,
                                    log=log, memory_dir=memory, **kw)
     return ledger, board, scheduler, caller, log
+
+
+def _recover_stale_owned_processes(cfg, agentic_dir, root, scheduler, clock,
+                                   log):
+    """Reconcile process-ownership records left by a run whose OWNING
+    Python process was killed outright (not just its child) before its
+    own `finally: lease.release(); lock.release()` could run -- the one
+    scenario core.supervisor's own bounded-timeout guarantee can never
+    prevent by itself. Runs before this cycle even attempts its own
+    lock/lease acquisition, so a confirmed-dead prior run's stale state
+    never makes a fresh attempt wait out a lease TTL (observed live:
+    2026-07-25, ollama-pilot, after a Codex CLI hang killed the owning
+    process)."""
+    from . import taskspace as _ts
+
+    def _release_lease(record):
+        lease = _ts.ProjectLease(agentic_dir, cfg.get("project", {}).get("name"),
+                                 clock=clock)
+        holder = lease.holder()
+        if not holder:
+            return
+        # Ownership is verified by PID, not run_id: `run_cycle` can
+        # acquire the lease before `_run_cycle_locked` has generated
+        # its own run_id (a pre-existing gap -- the lease's own
+        # `run_id` field is often null), but the OS pid of the
+        # process that acquired it always matches this record's
+        # `parent_pid` (the process that spawned the supervised CLI
+        # call) when they're the same run. Never cleared on a PID
+        # match alone without the record's own identity already
+        # having been confirmed dead/reconciled by the caller.
+        if str(holder.get("pid")) == str(record.get("parent_pid")):
+            holder["status"] = "released"
+            lease._write(holder)   # noqa: SLF001 -- same file this class owns
+
+    def _release_lock(record):
+        lock_path = os.path.join(projstate.project_dir(agentic_dir),
+                                 "project.lock")
+        if not os.path.exists(lock_path):
+            return
+        try:
+            with open(lock_path, encoding="utf-8") as fh:
+                locked_pid = fh.read().strip()
+        except OSError:
+            return
+        if locked_pid and str(record.get("parent_pid")) == locked_pid:
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+
+    def _reconcile_task(record):
+        task_id = record.get("task_id")
+        if not task_id:
+            return
+        try:
+            projstate.update_task(agentic_dir, task_id, status="pending")
+        except errors.PolicyError:
+            pass
+        _ts.release_claim(agentic_dir, task_id)
+        if scheduler.state.get("state") == "running" and \
+                scheduler.state.get("current_cycle") == record.get("run_id"):
+            scheduler.state.update(state="idle", current_cycle=None,
+                                   next_run_at=None, cooling_reason=None,
+                                   deferred=None)
+            scheduler.save()
+
+    recovered = supervisor_mod.recover_stale_owned_processes(
+        agentic_dir, root=root, release_lease=_release_lease,
+        release_lock=_release_lock, reconcile_task=_reconcile_task, log=log)
+    if recovered:
+        log({"event": "supervisor_startup_recovery", "count": len(recovered),
+            "actions": [r["action"] for r in recovered]})
+    return recovered
 
 
 # -- project start -------------------------------------------------------------
@@ -311,6 +385,7 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
         return {"status": "no_project", "detail": "run project-start first"}
     ledger, board, scheduler, caller, log = _context(
         cfg, p["memory"], overrides=overrides, caller=caller, clock=clock, **kw)
+    _recover_stale_owned_processes(cfg, a, p["root"], scheduler, clock, log)
     cycle_minutes = ((cfg.get("scheduler") or {}).get("cycle") or {}).get(
         "maximum_duration_minutes",
         (cfg.get("cycle") or {}).get("maximum_duration_minutes"))
@@ -343,6 +418,7 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
     finally:
         lease.release()
         lock.release()
+        supervisor_mod.clear_run_context()
 
 
 def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
@@ -392,6 +468,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                       overrides, run_id):
     a = p["agentic"]
     run_id = run_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    supervisor_mod.set_run_context(
+        a, run_id, project_id=cfg.get("project", {}).get("name"))
     started_at = _dt.datetime.now()
     run_dir = os.path.join(p["runs"], "cycle-" + run_id)
     os.makedirs(run_dir, exist_ok=True)
@@ -543,7 +621,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         kind = (conducted.get("error") or {}).get("kind", "?")
         retry = (conducted.get("capacity") or {}).get("retry_after_seconds")
         return fail(kind if kind in ("rate_limit", "usage_limit")
-                    else "failure", "conductor failed: %s" % kind, retry)
+                    else "failure", "conductor failed: %s" % kind, retry,
+                    failure_class=failures.EXECUTION_TIMEOUT
+                    if kind == "timeout" else None)
     order = conducted["structured_output"]
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
@@ -579,6 +659,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     failure_class=failures.PROJECT_DEPENDENCY_MISSING)
     worktree = taskspace.create_task_worktree(p["root"], a, task["id"],
                                               PROJECT_BRANCH)
+    supervisor_mod.set_run_context(
+        a, run_id, project_id=cfg.get("project", {}).get("name"),
+        task_id=task["id"], worktree=worktree)
     # overwritten below only when Phase 5 parallel candidates ran and a
     # candidate OTHER than this primary worktree won -- the single-agent
     # path (the overwhelming majority of tasks) never touches this.
@@ -749,7 +832,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                              "from": result.get("backend"), "to": remaining[0]})
                         continue
                 return fail(kind if kind in ("rate_limit", "usage_limit")
-                            else "failure", "coder failed: %s" % kind, retry)
+                            else "failure", "coder failed: %s" % kind, retry,
+                            failure_class=failures.EXECUTION_TIMEOUT
+                            if kind == "timeout" else None)
             used_backend = result.get("backend", used_backend)
             usage = result.get("usage") or {}
             total_tokens += (usage.get("input_tokens") or 0) + \

@@ -68,7 +68,7 @@ class ConfiguredCLIBackend(CLIBackendBase):
             stdin_text = full_prompt
         argv = validate_cli_command(argv)
         run = self.runner(argv, cwd=workspace, timeout=timeout,
-                          stdin_text=stdin_text)
+                          stdin_text=stdin_text, role=role, backend=self.name)
         output = run["stdout"] + "\n" + run["stderr"]
         if run["timed_out"] or run["exit_code"] != 0:
             classify_cli_failure(self.name, run["exit_code"], output,

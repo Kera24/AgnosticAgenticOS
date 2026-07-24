@@ -209,9 +209,9 @@ class FakeRunner:
         self.responses = list(responses)
         self.calls = []
 
-    def __call__(self, argv, cwd=None, timeout=120, stdin_text=None):
+    def __call__(self, argv, cwd=None, timeout=120, stdin_text=None, **kw):
         self.calls.append({"argv": list(argv), "cwd": cwd,
-                           "timeout": timeout, "stdin": stdin_text})
+                           "timeout": timeout, "stdin": stdin_text, **kw})
         item = self.responses.pop(0) if self.responses else \
             {"exit_code": 0, "stdout": "", "stderr": ""}
         if isinstance(item, Exception):
