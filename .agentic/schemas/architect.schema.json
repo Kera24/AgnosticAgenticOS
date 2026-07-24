@@ -33,7 +33,20 @@
           "dependencies": {"type": "array", "items": {"type": "string"}},
           "risk": {"type": "string", "enum": ["low", "medium", "high"]},
           "security_relevant": {"type": "boolean"},
-          "expected_paths": {"type": "array", "items": {"type": "string"}},
+          "expected_paths": {
+            "type": "array",
+            "description": "Required deliverables (the acceptance contract) -- NOT a second write allowlist; see allowed_paths for what may be touched. Either a legacy string (a literal path, a path ending '/' for a directory, or a glob for advisory matching) or an explicit object.",
+            "items": {
+              "type": ["string", "object"],
+              "required": ["path"],
+              "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "type": {"type": "string", "enum": ["file", "directory"]},
+                "required": {"type": "boolean"},
+                "non_empty": {"type": "boolean"}
+              }
+            }
+          },
           "expected_size": {"type": "string",
                             "enum": ["small", "medium", "large"]},
           "acceptance_criteria": {"type": "array",

@@ -36,7 +36,8 @@
             "type": "string",
             "enum": [
               "write",
-              "delete"
+              "delete",
+              "mkdir"
             ]
           },
           "content": {

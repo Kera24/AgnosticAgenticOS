@@ -36,5 +36,20 @@ Key properties enforced in code, not prompts: no shell for model commands
 (`core/execpolicy.py`), workspace path confinement, secret redaction,
 deterministic checks as the final vote, no push/merge/deploy anywhere.
 
+A task contract (`core/contract.py`,
+`schemas/task-contract.schema.json`) and a code-only feasibility
+preflight (`core/preflight.py`) run before any model is invoked; a
+stable 12-class failure taxonomy (`core/failures.py`) keeps
+platform-caused failures from ever masquerading as model/provider
+failures; a content-addressed artifact/result cache
+(`core/cachestore.py`) sits alongside (never instead of) provider-native
+caching; an execution-engine abstraction (`core/execengine.py`) makes
+the coder invocation itself swappable (native, always available; Orca,
+opt-in and falling back automatically); and risk-triggered supervised
+parallelism (`core/parallel.py`) fans a task out into isolated
+candidates only when a real risk signal warrants it. See
+`docs/phase1-5-final-report.md` for the full schemas, taxonomy, cache
+telemetry semantics, Orca adapter contract, and parallelism policy.
+
 See the ADRs in `docs/adr/` and the phase design in
 `.agentic/project/platform-upgrade-design.md`.

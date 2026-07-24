@@ -77,6 +77,12 @@ class ProjectLock:
         self.path = os.path.join(project_dir(agentic_dir), name)
         self.stale_seconds = stale_seconds
         self.fd = None
+        # set True by `acquire()` exactly when it broke a stale lock to
+        # get in -- an interrupted-cycle recovery signal callers can log
+        # (auditable, per Phase 1.G) without changing acquire()'s own
+        # boolean return contract.
+        self.broke_stale_lock = False
+        self.broke_stale_lock_age_seconds = None
 
     def acquire(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -94,6 +100,8 @@ class ProjectLock:
                     os.remove(self.path)
                 except OSError:
                     return False
+                self.broke_stale_lock = True
+                self.broke_stale_lock_age_seconds = int(age)
                 return self.acquire()
             return False
 
@@ -208,11 +216,13 @@ BLOCKER_CODE_GENUINE_HUMAN_DECISION = "genuine_human_decision"
 BLOCKER_CODE_POLICY_DENIED = "policy_denied"
 BLOCKER_CODE_DEPENDENCY_MISSING = "dependency_missing"
 BLOCKER_CODE_AUTHENTICATION_REQUIRED = "authentication_required"
+BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH = "structural_contract_mismatch"
 BLOCKER_CODES = (BLOCKER_CODE_DETERMINISTIC_CHECKS_MISSING,
                  BLOCKER_CODE_GENUINE_HUMAN_DECISION,
                  BLOCKER_CODE_POLICY_DENIED,
                  BLOCKER_CODE_DEPENDENCY_MISSING,
-                 BLOCKER_CODE_AUTHENTICATION_REQUIRED)
+                 BLOCKER_CODE_AUTHENTICATION_REQUIRED,
+                 BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH)
 
 
 def add_blocker(agentic_dir, task_id, reason, human_only=False, code=None):

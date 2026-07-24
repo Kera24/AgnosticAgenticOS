@@ -1,0 +1,75 @@
+{
+  "$id": "agentic/task-contract",
+  "$comment": "Documents the shape produced by core.contract.build_task_contract. This is a projection of the existing backlog task + work order, not a new persisted file -- no migration of backlog.yaml/work-order.json is required. Consumed by: architect (indirectly, via the backlog task it emits), conductor (via the work order), worker, security policy, the filesystem capability layer (core.fscap), the deterministic gate, the QA reviewer, the recovery engine, and the native/Orca execution engines.",
+  "type": "object",
+  "required": ["contract_version", "project_id", "task_id", "kind",
+               "objective", "dependencies", "required_inputs",
+               "required_outputs", "allowed_paths", "prohibited_paths",
+               "required_capabilities", "execution_budget",
+               "deterministic_checks", "acceptance_criteria",
+               "decision_classifications", "risk", "rollback_strategy",
+               "completion_evidence_requirements"],
+  "properties": {
+    "contract_version": {"type": "string", "enum": ["1.0"]},
+    "project_id": {"type": ["string", "null"]},
+    "task_id": {"type": ["string", "null"]},
+    "run_id": {"type": ["string", "null"]},
+    "kind": {"type": ["string", "null"],
+             "description": "bootstrap | test_setup | unset (ordinary feature/business-logic task)"},
+    "objective": {"type": "string"},
+    "dependencies": {"type": "array", "items": {"type": "string"}},
+    "required_inputs": {"type": "array", "items": {"type": "string"}},
+    "required_outputs": {
+      "type": "array",
+      "description": "The acceptance contract -- NOT a second write allowlist. See allowed_paths for the security boundary.",
+      "items": {
+        "type": "object",
+        "required": ["path", "type", "required", "non_empty"],
+        "properties": {
+          "path": {"type": "string"},
+          "type": {"type": "string",
+                   "enum": ["file", "directory", "glob", "unknown"]},
+          "required": {"type": "boolean"},
+          "non_empty": {"type": "boolean"}
+        }
+      }
+    },
+    "allowed_paths": {
+      "type": "array", "items": {"type": "string"},
+      "description": "THE security boundary: the worker may only create/modify/delete paths matching one of these globs. All paths resolve inside the registered project/worktree root."
+    },
+    "prohibited_paths": {"type": "array", "items": {"type": "string"}},
+    "required_capabilities": {"type": "array", "items": {"type": "string"}},
+    "execution_budget": {
+      "type": "object",
+      "properties": {
+        "maximum_changed_lines": {"type": ["integer", "null"]},
+        "expected_size": {"type": "string",
+                          "enum": ["small", "medium", "large"]}
+      }
+    },
+    "deterministic_checks": {"type": "array", "items": {"type": "string"}},
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "decision_classifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "decision": {"type": "string"},
+          "category": {"type": "string",
+                       "enum": ["reversible_technical_choice",
+                               "human_required"]},
+          "resolution_method": {"type": ["string", "null"],
+                                "enum": ["autonomous_default",
+                                        "inferred_from_repository", null]}
+        }
+      }
+    },
+    "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+    "rollback_strategy": {"type": "string"},
+    "completion_evidence_requirements": {
+      "type": "array", "items": {"type": "string"}
+    },
+    "built_at": {"type": "string"}
+  }
+}

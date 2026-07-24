@@ -41,6 +41,12 @@ HYPOTHETICAL_RUNTIME_FILES = [
     ".agentic/memory/decisions.jsonl",
     ".agentic/memory/usage.tsv",
     ".agentic/memory/some-new-ledger-nobody-has-invented-yet.db",
+    # Phase 2: the prompt/context cache store and its telemetry ledger --
+    # entries may themselves embed repository content, so they must never
+    # be committable even though core.cachestore also refuses at write
+    # time to store anything that looks sensitive.
+    ".agentic/memory/cache/some-cache-key.json",
+    ".agentic/memory/cache-telemetry.jsonl",
 ]
 
 

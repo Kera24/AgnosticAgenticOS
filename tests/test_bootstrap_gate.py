@@ -82,8 +82,9 @@ def test_structural_gate_never_passes_with_zero_applicable_checks(
         return bootstrap_gate._result("stub", "structural", True, True,
                                       "stubbed out", applicable=False)
     for name in ("_check_files_changed", "_check_files_non_empty",
-                "_check_root_containment", "_check_expected_paths",
-                "_check_git_valid", "_check_no_credentials",
+                "_check_root_containment", "_check_expected_outputs",
+                "_check_additional_files", "_check_git_valid",
+                "_check_no_credentials", "_check_gitignore_safe",
                 "_check_manifest_parses", "_check_entry_points_exist",
                 "_check_html_structural", "_check_js_syntax"):
         monkeypatch.setattr(bootstrap_gate, name,
@@ -205,12 +206,23 @@ def test_root_containment_check_blocks_path_escape(tmp_path):
     assert "outside.txt" in result["detail"]
 
 
-def test_expected_paths_check_blocks_files_outside_declared_scope():
-    task = {"expected_paths": ["src/**"]}
-    result = bootstrap_gate._check_expected_paths(
-        task, ["src/app.py", "outside/evil.py"])
-    assert result["passed"] is False
-    assert "outside/evil.py" in result["detail"]
+def test_expected_outputs_check_is_an_acceptance_contract_not_an_allowlist(
+        tmp_path):
+    """The exact live bug (run 20260722-181213): expected_paths must
+    never be treated as a second write allowlist. A changed file that
+    isn't one of the required expected outputs (e.g. .gitignore) must
+    never fail this check on its own -- only a genuinely MISSING required
+    output should."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.js").write_text("x", encoding="utf-8")
+    task = {"expected_paths": [
+        {"path": "src", "type": "directory", "required": True},
+        {"path": "src/index.js", "type": "file", "required": True,
+         "non_empty": True}]}
+    result = bootstrap_gate._check_expected_outputs(
+        task, str(tmp_path), ["src/index.js", ".gitignore"])
+    assert result["passed"] is True
+    assert ".gitignore" not in result["detail"]
 
 
 # 11 + 12: existing repair/handoff behaviour and the full suite are verified

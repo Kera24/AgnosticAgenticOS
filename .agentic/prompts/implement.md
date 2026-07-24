@@ -22,6 +22,13 @@ You implement exactly one validated work order. Nothing else.
   execute only if they are on the configured allowlist.
 - Provide complete file contents in `content` for `write` actions — the file
   is replaced wholesale.
+- Writing a file automatically creates any missing parent directories —
+  you never need a separate step just to create the folder a file lives in.
+  Use `action: "mkdir"` (no `content` needed) ONLY when the work order
+  requires an empty directory to exist with no file in it yet (e.g. a bare
+  scaffold placeholder like an empty `src/` before any source file is
+  written). Never set `blocked: true` just because a required output is a
+  directory — either write a file inside it, or use `mkdir`.
 
 ## Output
 
@@ -33,7 +40,7 @@ Return ONLY one JSON object, no prose, matching:
   "blocked": false,
   "blocker": null,
   "edits": [
-    {"path": "relative/path", "action": "write | delete", "content": "full new file content or null"}
+    {"path": "relative/path", "action": "write | delete | mkdir", "content": "full new file content or null"}
   ],
   "commands": []
 }

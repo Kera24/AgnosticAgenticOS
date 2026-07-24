@@ -35,3 +35,12 @@ Each phase is one local commit; `git revert` restores previous behaviour.
 Subsystems also switch off individually: `context.code_intelligence.
 provider: none`, `memory.enabled: false`, `knowledge.enabled: false`,
 `skills.enabled: false`, `caching.enabled: false`.
+
+## Reliability/cache/native-proof/Orca/parallelism upgrade
+
+Nothing you must do here either — every new config key
+(`execution.preferred_engine`/`fallback_engine`, `orca:`,
+`parallelism:`) defaults to reproducing the exact prior behaviour
+(native engine, no Orca, no parallel fan-out without an actual risk
+signal). Full migration plan, opt-in steps, and rollback details:
+`docs/phase1-5-final-report.md` §9.

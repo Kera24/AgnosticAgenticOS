@@ -43,14 +43,41 @@ _RELEVANCE = {"work_order": 1.0, "validation": 0.95, "project_summary": 0.7,
 _SHARED_POLICY_FILES = ("shared-autonomy.md", "shared-scope.md")
 
 
-def _policy_text():
+def _policy_text(memory_dir=None):
+    """The stable OS policy prefix -- identical on every single call
+    until the policy files themselves change. Cached (Phase 2, artifact
+    cache category `prompt_prefix_text`) keyed by the policy files'
+    OWN content hashes, so a policy edit invalidates it automatically
+    and nothing else in the cache is touched. Falls back to reading the
+    files directly when no `memory_dir` is available (unchanged
+    behaviour for any caller that predates this)."""
     base = config_mod.AGENTIC_DIR / "prompts"
-    parts = []
-    for name in _SHARED_POLICY_FILES:
-        path = base / name
-        if path.exists():
-            parts.append(path.read_text(encoding="utf-8"))
-    return "\n\n".join(parts)
+    paths = [base / name for name in _SHARED_POLICY_FILES]
+
+    def _read():
+        return "\n\n".join(p.read_text(encoding="utf-8") for p in paths
+                           if p.exists())
+
+    if memory_dir is None:
+        return _read()
+    from .. import cachestore
+    file_hashes = {name: cachestore.hash_file(str(base / name))
+                   for name in _SHARED_POLICY_FILES if (base / name).exists()}
+    key = cachestore.compute_cache_key(artifact="policy_text",
+                                       files=file_hashes)
+    store = cachestore.CacheStore(memory_dir)
+    cached, hit = store.get(key, category="prompt_prefix_text")
+    if hit:
+        return cached
+    text = _read()
+    try:
+        store.put_artifact(key, text, "prompt_prefix_text",
+                           dependencies={"policy_files": file_hashes},
+                           tokens_estimated=len(text) // 4,
+                           source_hint="policy_text")
+    except cachestore.CacheError:
+        pass   # a cache-safety rejection must never break prompt assembly
+    return text
 
 
 def _as_text(value):
@@ -156,7 +183,7 @@ def compose(cfg, role, role_prompt, input_data=None, schema=None, *,
             reserved_output_tokens=None):
     """Build the ContextPackage for one model invocation."""
     items = [
-        ContextItem("policy", _policy_text(), source_type="os",
+        ContextItem("policy", _policy_text(memory_dir), source_type="os",
                     relevance_score=1.0),
         ContextItem("role_contract", role_prompt, source_type="os",
                     relevance_score=1.0),

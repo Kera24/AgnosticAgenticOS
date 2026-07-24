@@ -24,6 +24,43 @@ execution:
   goal_timeout_seconds: 60
   # Commands the worker may request via execute_safe_commands. Enforced in code.
   safe_commands: []     # e.g. ["python -m pytest -q", "npm test"]
+  # Execution-engine selection (Phase 4, core/execengine.py). "native" is
+  # the platform's own coder invocation and is always available; "orca"
+  # is opt-in (see the `orca:` section below) and falls back to native
+  # automatically when absent, disabled, or an unsupported version.
+  preferred_engine: native
+  fallback_engine: native
+
+# Optional external execution-engine adapter (core/execengine.py). Never
+# required: AgenticOS remains fully functional with orca.enabled: false
+# (the shipped default). AgenticOS stays authoritative for task
+# selection, the task contract, allowed_paths, model selection,
+# capacity, verification, review, completion, memory, cooling and
+# recovery regardless of this setting -- orca only ever supervises
+# execution/session/worktree for the coder role.
+orca:
+  enabled: false
+  executable: orca
+  # Explicit only -- pin the exact version(s) you have actually tested
+  # against this platform release. An empty list means orca can never
+  # be selected, even if installed: "assume the latest works" is not a
+  # supported posture here.
+  supported_versions: []
+  fallback_to_native: true
+
+# Supervised parallelism (Phase 5, core/parallel.py). Most tasks never
+# touch this -- only a task that trips one of the six documented risk
+# signals (difficult architecture, high-risk refactoring, hard
+# debugging, competing UI proposals, security-sensitive changes,
+# repeated single-agent failure) fans out into isolated candidates, and
+# never more than max_agents_global at once. Candidates never share a
+# worktree; a failed deterministic gate always disqualifies a candidate
+# regardless of any other signal; an ambiguous (tied) selection holds
+# the final merge for a human decision rather than guessing.
+parallelism:
+  max_projects_global: 4
+  max_agents_global: 3
+  default_agents_per_task: 1
 
 roles:
   triage:

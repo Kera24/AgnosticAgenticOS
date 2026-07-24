@@ -18,6 +18,7 @@ import json
 import os
 
 DEFAULT_COOLING = {"after_success_minutes": 30, "after_failure_minutes": 30,
+                   "after_platform_failure_minutes": 5,
                    "minimum_minutes": 5, "maximum_minutes": 360,
                    "adaptive": True}
 
@@ -68,37 +69,100 @@ class Scheduler:
                    min(float(minutes),
                        float(cooling.get("maximum_minutes", 360))))
 
-    def cooldown_minutes(self, outcome, retry_after_seconds=None,
-                         breaker_wait_seconds=None, failure_streak=0):
+    def cooldown_breakdown(self, outcome, retry_after_seconds=None,
+                           breaker_wait_seconds=None, failure_streak=0):
+        """Same number `cooldown_minutes` returns, plus a transparent
+        explanation of how it was computed -- there is no hidden
+        hard-coded value anywhere in this calculation, only: the
+        configured base (`scheduler.cooling.after_failure_minutes`,
+        default 30), an exponential-backoff multiplier applied ONLY when
+        `dynamic`/`adaptive` is enabled (default on) AND this is at
+        least the second consecutive failure, OR a capacity/rate-limit
+        hint for provider-side outcomes, OR the short, NEVER-escalating
+        `after_platform_failure_minutes` base for a failure the platform
+        itself classified as its own (see core.failures) rather than the
+        model's or the provider's -- then the configured
+        [minimum_minutes, maximum_minutes] clamp. `source` names exactly
+        which of those produced the number."""
         cooling = self._cooling_cfg()
+        detail = {
+            "outcome": outcome,
+            "configured_after_success_minutes":
+                float(cooling.get("after_success_minutes", 30)),
+            "configured_after_failure_minutes":
+                float(cooling.get("after_failure_minutes", 30)),
+            "configured_after_platform_failure_minutes":
+                float(cooling.get("after_platform_failure_minutes", 5)),
+            "dynamic_backoff_enabled":
+                bool(cooling.get("dynamic", cooling.get("adaptive", True))),
+            "failure_streak": failure_streak, "backoff_multiplier": 1.0,
+            "minimum_minutes": float(cooling.get("minimum_minutes", 5)),
+            "maximum_minutes": float(cooling.get("maximum_minutes", 360)),
+            "source": None, "base_minutes": None, "raw_minutes": None,
+            "clamped_minutes": None,
+        }
         if outcome == "success":
-            minutes = float(cooling.get("after_success_minutes", 30))
+            detail["source"] = "configured_success_cooldown"
+            minutes = detail["base_minutes"] = \
+                detail["configured_after_success_minutes"]
         elif outcome in ("rate_limit", "usage_limit"):
             if retry_after_seconds:
+                detail["source"] = "provider_retry_after_hint"
                 minutes = retry_after_seconds / 60.0
             elif breaker_wait_seconds:
+                detail["source"] = "circuit_breaker_recovery_estimate"
                 minutes = breaker_wait_seconds / 60.0
             else:
+                detail["source"] = "capacity_default"
                 minutes = 60.0 if outcome == "usage_limit" else 15.0
+            detail["base_minutes"] = minutes
+        elif outcome == "platform_failure":
+            # a defect in the platform's own contract/capability/policy
+            # layer, never the model's or provider's fault: short, FLAT
+            # cooldown -- never the exponential backoff below, which
+            # exists to protect a struggling MODEL/PROVIDER, not to
+            # penalise the platform for its own (often already-fixed-by-
+            # recovery) bug.
+            detail["source"] = "configured_platform_failure_cooldown"
+            minutes = detail["base_minutes"] = \
+                detail["configured_after_platform_failure_minutes"]
         else:   # ordinary failure; consecutive failures escalate (adaptive)
-            minutes = float(cooling.get("after_failure_minutes", 30))
-            dynamic = cooling.get("dynamic", cooling.get("adaptive", True))
-            if dynamic and failure_streak > 1:
-                minutes *= 2 ** min(failure_streak - 1, 3)
-        return self._clamp(minutes)
+            detail["source"] = "configured_failure_cooldown"
+            minutes = detail["base_minutes"] = \
+                detail["configured_after_failure_minutes"]
+            if detail["dynamic_backoff_enabled"] and failure_streak > 1:
+                exponent = min(failure_streak - 1, 3)
+                detail["backoff_multiplier"] = float(2 ** exponent)
+                detail["source"] = ("configured_failure_cooldown+"
+                                    "exponential_backoff")
+                minutes *= detail["backoff_multiplier"]
+        detail["raw_minutes"] = minutes
+        detail["clamped_minutes"] = self._clamp(minutes)
+        return detail
+
+    def cooldown_minutes(self, outcome, retry_after_seconds=None,
+                         breaker_wait_seconds=None, failure_streak=0):
+        return self.cooldown_breakdown(
+            outcome, retry_after_seconds, breaker_wait_seconds,
+            failure_streak)["clamped_minutes"]
 
     def start_cooling(self, outcome, retry_after_seconds=None,
                       breaker_wait_seconds=None):
         if outcome == "success":
             self.state["failure_streak"] = 0
-        elif outcome not in ("rate_limit", "usage_limit"):
+        elif outcome not in ("rate_limit", "usage_limit", "platform_failure"):
+            # a platform_failure never touches the streak: it is not
+            # evidence the MODEL or PROVIDER is struggling, so it must
+            # never feed the exponential backoff that protects them.
             self.state["failure_streak"] = \
                 int(self.state.get("failure_streak") or 0) + 1
-        minutes = self.cooldown_minutes(
+        breakdown = self.cooldown_breakdown(
             outcome, retry_after_seconds, breaker_wait_seconds,
             failure_streak=int(self.state.get("failure_streak") or 0))
+        minutes = breakdown["clamped_minutes"]
         until = self.clock() + _dt.timedelta(minutes=minutes)
         self.state.update(state="cooling", cooling_reason=outcome,
+                          cooling_detail=breakdown,
                           next_run_at=until.isoformat(timespec="seconds"),
                           deferred=None)
         self.save()

@@ -19,7 +19,9 @@ import re
 import shutil
 import subprocess
 
-from . import gitops, projstate
+from . import errors, gitops, projstate
+
+_GLOB_CHARS_RE = re.compile(r"[*?\[]")
 
 BOOTSTRAP_KIND = "bootstrap"
 TEST_SETUP_KINDS = ("test_setup", "testing_setup", "test_framework")
@@ -149,19 +151,203 @@ def _check_root_containment(worktree, changed):
                    else "all changed files stay inside the project root")
 
 
-def _check_expected_paths(task, changed):
-    expected = (task or {}).get("expected_paths") or []
-    if not expected:
-        return _result("bootstrap-expected-paths", "project_isolation", True,
+def normalize_expected_entry(entry):
+    """Normalise one `task.expected_paths` entry -- the new explicit dict
+    form ({"path", "type", "required", "non_empty"}) or a legacy string
+    -- into {"path", "type", "required", "non_empty"}. `type` is one of
+    "file" / "directory" / "glob" / "unknown". A bare legacy string with
+    no trailing "/" and no extension is genuinely ambiguous: per item 4,
+    this NEVER guesses file-vs-directory when that guess could affect
+    safety -- "unknown" accepts either, as long as SOMETHING exists
+    there. A string containing glob metacharacters (*, ?, [) is treated
+    as a legacy advisory pattern: "at least one changed file matches",
+    never a literal path to stat."""
+    if isinstance(entry, dict):
+        path = str(entry.get("path", "")).replace("\\", "/").rstrip("/")
+        etype = entry.get("type")
+        if etype not in ("file", "directory"):
+            etype = "directory" if str(entry.get("path", "")).endswith("/") \
+                else "unknown"
+        return {"path": path, "type": etype,
+                "required": bool(entry.get("required", True)),
+                "non_empty": bool(entry.get("non_empty", False))}
+    text = str(entry).replace("\\", "/")
+    if _GLOB_CHARS_RE.search(text):
+        return {"path": text, "type": "glob", "required": True,
+               "non_empty": False}
+    if text.endswith("/"):
+        return {"path": text.rstrip("/"), "type": "directory",
+               "required": True, "non_empty": False}
+    base = os.path.basename(text)
+    if "." in base.lstrip("."):
+        return {"path": text, "type": "file", "required": True,
+               "non_empty": False}
+    return {"path": text, "type": "unknown", "required": True,
+           "non_empty": False}
+
+
+def expected_path_strings(task):
+    """Flat list of plain path strings from `task.expected_paths`,
+    whatever mix of legacy strings and new dict-form entries it contains
+    -- for the handful of call sites elsewhere (ownership claims, UI-role
+    detection, ...) that only ever needed glob-matchable strings and
+    predate the dict form."""
+    return [normalize_expected_entry(e)["path"]
+           for e in (task or {}).get("expected_paths") or []]
+
+
+def _check_expected_outputs(task, worktree, changed):
+    """The acceptance contract (item 2/3/4/7): every REQUIRED expected
+    output must exist and satisfy its declared type -- never a second
+    write allowlist. `allowed_paths` (already enforced upstream, before
+    the gate even runs) is the only write boundary; this check only ever
+    asks "does the required deliverable exist", never "was anything
+    unexpected also touched". Distinguishes missing_file /
+    missing_directory / wrong_type / empty_required_file so a repair
+    attempt gets a precise, actionable reason."""
+    raw_entries = (task or {}).get("expected_paths") or []
+    if not raw_entries:
+        return _result("bootstrap-expected-outputs", "structural", True,
                        True, "task declares no expected_paths to check",
                        applicable=False)
-    outside = [p for p in changed if not gitops.matches_any(p, expected)]
-    passed = not outside
-    return _result("bootstrap-expected-paths", "project_isolation", True,
-                   passed,
-                   "file(s) outside task's expected_paths: %s"
-                   % ", ".join(outside) if outside
-                   else "all changed files are within expected_paths")
+    problems, satisfied = [], []
+    for raw in raw_entries:
+        entry = normalize_expected_entry(raw)
+        path, etype = entry["path"], entry["type"]
+        if etype == "glob":
+            matched = [p for p in changed if gitops.match_pattern(p, path)]
+            if matched:
+                satisfied.append("%s (matched %s)" % (path, matched[0]))
+            elif entry["required"]:
+                problems.append(
+                    "missing_file: no changed file matches %r" % path)
+            continue
+        try:
+            full = gitops.safe_join(worktree, path)
+        except errors.PolicyError:
+            problems.append(
+                "invalid_path: expected_paths entry escapes the "
+                "worktree: %r" % path)
+            continue
+        is_file, is_dir = os.path.isfile(full), os.path.isdir(full)
+        if etype == "directory":
+            if is_file:
+                problems.append(
+                    "wrong_type: %r expected a directory, found a file"
+                    % path)
+            elif not is_dir:
+                if entry["required"]:
+                    problems.append("missing_directory: %r" % path)
+            else:
+                satisfied.append(path)
+        elif etype == "file":
+            if is_dir:
+                problems.append(
+                    "wrong_type: %r expected a file, found a directory"
+                    % path)
+            elif not is_file:
+                if entry["required"]:
+                    problems.append("missing_file: %r" % path)
+            elif entry["non_empty"] and os.path.getsize(full) == 0:
+                problems.append("empty_required_file: %r" % path)
+            else:
+                satisfied.append(path)
+        else:   # unknown -- never guess which type was intended
+            if not is_file and not is_dir:
+                if entry["required"]:
+                    problems.append(
+                        "missing_file: %r (type not specified)" % path)
+            else:
+                satisfied.append(path)
+    passed = not problems
+    detail = "; ".join(problems) if problems else \
+        "all required expected outputs present: %s" % ", ".join(satisfied)
+    return _result("bootstrap-expected-outputs", "structural", True, passed,
+                   detail)
+
+
+def _check_additional_files(task, changed):
+    """Informational only, never a source of failure: names the changed
+    files that are NOT one of the task's required expected outputs
+    (item 2 bullet 5 -- "report allowed additional files explicitly in
+    evidence"). They are fine precisely because everything reaching this
+    point already cleared allowed_paths, the protected-path check, and
+    bootstrap-no-credential-files upstream; this is transparency, not a
+    second gate."""
+    raw_entries = (task or {}).get("expected_paths") or []
+    normalized = [normalize_expected_entry(r) for r in raw_entries]
+    literal = {e["path"] for e in normalized if e["type"] != "glob"}
+    globs = [e["path"] for e in normalized if e["type"] == "glob"]
+    extra = [p for p in changed if p not in literal and
+            not any(gitops.match_pattern(p, g) for g in globs)]
+    return _result("bootstrap-additional-files", "structural", False, True,
+                   "additional file(s) beyond required expected outputs "
+                   "(allowed -- within allowed_paths and not flagged by "
+                   "any other check): %s" % ", ".join(extra) if extra
+                   else "no additional files beyond expected outputs",
+                   applicable=bool(extra))
+
+
+_DANGEROUS_GITIGNORE_NEGATION_RE = re.compile(
+    r"^!\s*\S*(\.env\b|secret|credential|token|password|session|"
+    r"\.pem\b|\.key\b|auth-verification|model-registry)", re.I)
+
+
+def _check_gitignore_safe(worktree, changed):
+    """.gitignore is a normal scaffold-support file -- allowed whenever
+    it's within allowed_paths (item 7), never required to also appear in
+    expected_paths (that was the exact live bug). The only thing checked
+    HERE is that it doesn't contain a negation pattern (`!...`) that
+    would un-ignore something matching a credential/runtime pattern.
+    Matched on the negated filename itself, not merely on it living
+    somewhere under a memory/runtime directory -- a project un-ignoring
+    its own known-safe template file (e.g. a memory README) is not
+    "dangerous" just because the directory also holds other, genuinely
+    sensitive runtime state."""
+    gi_path = os.path.join(worktree, ".gitignore")
+    if ".gitignore" not in changed or not os.path.exists(gi_path):
+        return _result("bootstrap-gitignore-safe", "security", True, True,
+                       ".gitignore not changed or not present",
+                       applicable=False)
+    try:
+        with open(gi_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return _result("bootstrap-gitignore-safe", "security", True, False,
+                       "could not read .gitignore: %s" % exc)
+    dangerous = [ln.strip() for ln in lines
+                if _DANGEROUS_GITIGNORE_NEGATION_RE.match(ln.strip())]
+    passed = not dangerous
+    return _result("bootstrap-gitignore-safe", "security", True, passed,
+                   "dangerous negation pattern(s) in .gitignore expose "
+                   "credential/runtime state: %s" % "; ".join(dangerous)
+                   if dangerous
+                   else ".gitignore contains no dangerous negation "
+                        "patterns")
+
+
+def validate_task_contract(task, allowed_paths):
+    """Reject an impossible contract BEFORE the model is ever invoked
+    (item 8): every required, non-glob expected output must be creatable
+    given `allowed_paths` -- the only write boundary. Returns a list of
+    problem strings; empty means the contract is satisfiable with the
+    available primitives (file write with auto-created parents, or the
+    `mkdir` action for a bare directory)."""
+    problems = []
+    for raw in (task or {}).get("expected_paths") or []:
+        entry = normalize_expected_entry(raw)
+        if not entry["required"] or entry["type"] == "glob":
+            continue
+        path = entry["path"]
+        coverable = (gitops.matches_any(path, allowed_paths) or
+                    gitops.directory_is_allowed(path, allowed_paths) or
+                    gitops.directory_is_allowed(
+                        os.path.dirname(path) or ".", allowed_paths))
+        if not coverable:
+            problems.append(
+                "required expected output %r is not coverable by "
+                "allowed_paths %r" % (path, allowed_paths))
+    return problems
 
 
 def _check_git_valid(worktree):
@@ -315,9 +501,11 @@ def run_structural_checks(task, worktree, log_dir=None):
         _check_files_changed(changed),
         _check_files_non_empty(worktree, changed_status),
         _check_root_containment(worktree, changed),
-        _check_expected_paths(task, changed),
+        _check_expected_outputs(task, worktree, changed),
+        _check_additional_files(task, changed),
         _check_git_valid(worktree),
         _check_no_credentials(changed),
+        _check_gitignore_safe(worktree, changed),
         _check_manifest_parses(worktree),
         _check_entry_points_exist(worktree),
         _check_html_structural(worktree, changed),
@@ -432,4 +620,112 @@ def recover_bootstrap_deadlock(agentic_dir):
                                                            task["id"])
         events.append({"task_id": task["id"], "retagged_kind": retag,
                        "resolved_blockers": resolved})
+    return events
+
+
+# -- recovery: the expected_paths-as-allowlist contract bug ---------------------
+
+STRUCTURAL_CONTRACT_MISMATCH_CODE = \
+    projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH
+
+# Matches the exact historical failures this class of bug produced:
+#  - run 20260722-181213: expected_paths wrongly enforced as a second
+#    write allowlist ("... is outside task's expected_paths despite
+#    being in allowed_paths ...") and/or no primitive for a bare
+#    required directory ("Cannot create src/ directory through file
+#    write operations").
+#  - run 20260723-225324: a preserved task worktree from an earlier
+#    (pre-fix) attempt held a file (".gitignore") outside a NEWER,
+#    narrower work order's allowed_paths, and the worker had no way to
+#    resolve it -- even a "delete" needs allowed_paths membership
+#    ("Forbidden path .gitignore was touched during previous cycle;
+#    WORKER role cannot edit paths outside allowed_paths ...", "cannot
+#    create ... directory ... git init or mkdir on valid paths"). Fixed
+#    by project.py's preserved-work scope-compatibility check, which
+#    now resets an incompatible preserved worktree itself instead of
+#    handing the model an unsolvable catch-22.
+_LEGACY_EXPECTED_PATHS_CONTRACT_RE = re.compile(
+    r"outside task.?s expected_paths|expected_paths.{0,40}despite.{0,40}"
+    r"allowed_paths|cannot create[^.]{0,80}directory|"
+    r"forbidden path .{0,80} touched|"
+    r"cannot edit paths outside allowed_paths", re.I)
+
+
+def _is_legacy_expected_paths_contract_block(task):
+    return bool(_LEGACY_EXPECTED_PATHS_CONTRACT_RE.search(
+        task.get("blocking_reason") or ""))
+
+
+def _resolve_contract_blockers(agentic_dir, task_id):
+    blockers = projstate.read_yaml(agentic_dir, "blockers.yaml",
+                                   {"blockers": []})
+    resolved = 0
+    for b in blockers.get("blockers", []):
+        if b.get("resolved") or b.get("task") != task_id:
+            continue
+        if b.get("code") == STRUCTURAL_CONTRACT_MISMATCH_CODE or \
+                _LEGACY_EXPECTED_PATHS_CONTRACT_RE.search(
+                    b.get("reason") or ""):
+            b["resolved"] = True
+            b["code"] = STRUCTURAL_CONTRACT_MISMATCH_CODE
+            resolved += 1
+    if resolved:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers)
+    return resolved
+
+
+def _revert_preserved_worktree_if_present(agentic_dir, task_id):
+    """Best-effort: if this task has a preserved per-task worktree left
+    over from an earlier attempt, discard any uncommitted changes in it
+    now, at recovery time, instead of counting on the NEXT cycle's own
+    preserved-work compatibility check (project.py) to reach that code.
+    That check only runs on an `action: execute` cycle -- if the
+    conductor instead re-queues the task (observed live: run
+    20260723-235604 against ollama-pilot, immediately after this exact
+    recovery ran and reset the task to pending), the stale content is
+    never reached and never cleaned, and the model faces the same
+    unsolvable catch-22 again next time. Never raises: worktree cleanup
+    is a courtesy here, not a safety boundary (the real boundary is
+    `allowed_paths`, enforced fresh on every attempt regardless)."""
+    from . import taskspace
+    path = taskspace.task_worktree_path(agentic_dir, task_id)
+    if not os.path.exists(os.path.join(path, ".git")):
+        return False
+    gitops.run_git(["reset", "--hard", "HEAD"], cwd=path, check=False)
+    gitops.run_git(["clean", "-fd"], cwd=path, check=False)
+    return True
+
+
+def recover_expected_paths_contract_bug(agentic_dir):
+    """Self-healing for tasks blocked by the pre-fix expected_paths
+    contract mismatch (item 9): expected_paths was wrongly enforced as a
+    second write allowlist, so a normal scaffold-support file (e.g.
+    .gitignore) already inside allowed_paths could fail structural
+    validation, and the worker had no primitive for a bare required
+    directory. The bug was in the platform's own check (now fixed in
+    `_check_expected_outputs`/the `mkdir` edit action) -- not a security
+    boundary -- so recovery here is unconditional for any task matching
+    the exact historical wording: reset to pending, resolve only the
+    matching blocker(s), NEVER mark the task complete. The task's
+    preserved worktree is reverted here too (see
+    `_revert_preserved_worktree_if_present`) so the very next attempt
+    starts clean regardless of what the conductor decides to do with
+    it -- previously this relied entirely on project.py's own
+    preserved-work compatibility check running on a later `execute`
+    cycle, which never happens if the conductor re-queues instead."""
+    if not projstate.exists(agentic_dir):
+        return []
+    backlog = projstate.load_backlog(agentic_dir)
+    events = []
+    for task in backlog:
+        if task["status"] != "blocked" or \
+                not _is_legacy_expected_paths_contract_block(task):
+            continue
+        projstate.update_task(agentic_dir, task["id"], status="pending",
+                              blocking_reason=None)
+        resolved = _resolve_contract_blockers(agentic_dir, task["id"])
+        reverted = _revert_preserved_worktree_if_present(
+            agentic_dir, task["id"])
+        events.append({"task_id": task["id"], "resolved_blockers": resolved,
+                       "worktree_reverted": reverted})
     return events

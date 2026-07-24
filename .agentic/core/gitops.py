@@ -121,6 +121,40 @@ def matches_any(path, patterns):
     return any(match_pattern(path, p) for p in patterns or [])
 
 
+# Universal, non-source tool-generated artefacts that appear as a SIDE
+# EFFECT of running an approved deterministic check inside the worktree
+# (python -m pytest -q writes __pycache__/*.pyc and .pytest_cache/ as it
+# runs; npm/node likewise write into node_modules/.cache) -- never
+# something the worker itself chose to write, and never a legitimate
+# scope-violation signal. A properly-scaffolded project's own .gitignore
+# would normally keep git from ever staging these; this exclusion is the
+# same rule applied unconditionally, so a project without one yet (e.g.
+# a bootstrap task, before .gitignore itself has been written) can never
+# have a check's own output turned into a false scope-violation block on
+# the NEXT repair attempt in the same worktree.
+TOOL_ARTIFACT_PATTERNS = (
+    "__pycache__/**", "**/__pycache__/**", "*.pyc", "**/*.pyc",
+    "*.pyo", "**/*.pyo",
+    ".pytest_cache/**", "**/.pytest_cache/**",
+    "node_modules/**", "**/node_modules/**",
+    ".DS_Store", "**/.DS_Store",
+)
+
+
+def is_tool_artifact(path):
+    return matches_any(path, TOOL_ARTIFACT_PATTERNS)
+
+
+def filter_tool_artifacts(paths):
+    """Drops universal tool-generated artefacts from a changed-files
+    list before it reaches the scope-violation check (or any file/line
+    count) -- see `TOOL_ARTIFACT_PATTERNS`. Never widens what a worker
+    may WRITE (allowed_paths is untouched); only prevents a check's own
+    unavoidable side effects from being mistaken for an unauthorised
+    edit."""
+    return [p for p in paths if not is_tool_artifact(p)]
+
+
 def load_protected_paths(cfg, agentic_dir):
     patterns = []
     guard = os.path.join(agentic_dir, "guardrails", "protected-paths.txt")
@@ -190,12 +224,117 @@ def check_paths(paths, allowed, forbidden, protected,
 
 
 def safe_join(worktree, rel_path):
-    """Resolve rel_path inside worktree, rejecting traversal/absolute paths."""
+    """Resolve rel_path inside worktree, rejecting traversal/absolute/UNC
+    paths. `os.path.realpath` resolves every symlink/junction in the
+    chain (including intermediate components), so an escape hidden behind
+    a symlinked directory is caught by the containment check below just
+    like a literal `../`. The comparison is case-normalised (on Windows,
+    `normcase` also folds `/` to `\\`) so a same-target, different-case
+    path can never slip past the containment check on a case-insensitive
+    filesystem."""
     rel = rel_path.replace("\\", "/")
     if rel.startswith("/") or (len(rel) > 1 and rel[1] == ":"):
         raise errors.PolicyError("absolute path rejected: %s" % rel_path)
     full = os.path.realpath(os.path.join(worktree, rel))
     base = os.path.realpath(worktree)
-    if not full.startswith(base + os.sep) and full != base:
+    full_cmp = os.path.normcase(full)
+    base_with_sep_cmp = os.path.normcase(base + os.sep)
+    if not full_cmp.startswith(base_with_sep_cmp) and \
+            full_cmp != os.path.normcase(base):
         raise errors.PolicyError("path escapes worktree: %s" % rel_path)
     return full
+
+
+# Windows reserved device names -- never a legitimate directory/file
+# component regardless of extension (CON, CON.txt, con/sub, ... are all
+# reserved). Rejected outright by `safe_makedirs`.
+_RESERVED_DEVICE_NAMES = ({"CON", "PRN", "AUX", "NUL"} |
+                          {"COM%d" % i for i in range(1, 10)} |
+                          {"LPT%d" % i for i in range(1, 10)})
+
+
+def _reject_reserved_components(rel):
+    for part in rel.split("/"):
+        if not part:
+            continue
+        name = part.split(".", 1)[0].upper()
+        if name in _RESERVED_DEVICE_NAMES:
+            raise errors.PolicyError(
+                "reserved device name in path: %s" % rel)
+
+
+def directory_is_allowed(rel_dir, allowed):
+    """True if creating `rel_dir` is covered by `allowed_paths` -- either
+    a glob covering files under it (e.g. "src/**" authorises creating
+    "src"), or the directory itself listed literally (with or without a
+    trailing slash)."""
+    rel_dir = _norm(rel_dir).rstrip("/")
+    if not rel_dir or rel_dir == ".":
+        return True
+    probe = rel_dir + "/.__agentic_probe__"
+    return any(match_pattern(probe, p) or match_pattern(rel_dir, p) or
+              match_pattern(rel_dir + "/", p) for p in allowed or [])
+
+
+def safe_makedirs(worktree, rel_dir, allowed, protected,
+                  authorised_exceptions=None):
+    """The one sanctioned directory-creation primitive (item 5 of the
+    bootstrap-contract fix): creates `rel_dir` (and any parents) recursively,
+    ONLY inside the current worktree, ONLY when `allowed_paths` actually
+    covers it. Pure `os.makedirs` -- never spawns a shell process anywhere
+    in this call chain. Idempotent -- creating an already-existing directory
+    is a no-op, never an error. Rejects absolute paths, drive letters, UNC
+    paths, traversal, symlink/junction escapes (via `safe_join`'s realpath
+    containment check) and reserved device names. The resulting path is
+    validated with `safe_join` both BEFORE and AFTER the actual
+    `os.makedirs` call -- a directory that appears to have escaped after
+    creation is treated as a policy violation, not silently accepted."""
+    # absolute/drive/UNC rejection MUST happen before any stripping --
+    # stripping leading slashes first would silently turn "\\server\share"
+    # into the harmless-looking relative "server/share", rejecting nothing
+    # instead of raising.
+    unslashed = rel_dir.replace("\\", "/")
+    if unslashed.startswith("/") or (len(unslashed) > 1 and
+                                     unslashed[1] == ":"):
+        raise errors.PolicyError(
+            "absolute/UNC path rejected: %s" % rel_dir)
+    rel = unslashed.strip("/")
+    if not rel:
+        raise errors.PolicyError("empty directory path")
+    _reject_reserved_components(rel)
+    if matches_any(rel, protected) and \
+            not matches_any(rel, authorised_exceptions or []):
+        raise errors.PolicyError("directory is a protected path: %s" % rel)
+    if not directory_is_allowed(rel, allowed):
+        raise errors.PolicyError("directory outside allowed_paths: %s" % rel)
+    full_before = safe_join(worktree, rel)
+    os.makedirs(full_before, exist_ok=True)
+    full_after = safe_join(worktree, rel)
+    if not os.path.isdir(full_after):
+        raise errors.PolicyError(
+            "directory creation failed post-creation validation: %s" % rel)
+    return full_after
+
+
+def ensure_parent_dir(worktree, full_path):
+    """Create the parent directory of an ALREADY safe_join-validated file
+    path. The file path itself proved authorisation (it passed
+    `check_paths` against `allowed_paths` before `safe_join` produced
+    `full_path`), so this only needs the worktree-containment check --
+    re-applied before AND after `os.makedirs`, exactly like
+    `safe_makedirs` -- never a second, potentially-mismatched
+    allowed_paths glob check against the bare directory."""
+    parent = os.path.dirname(full_path)
+    base = os.path.realpath(worktree)
+    if not parent or os.path.normcase(parent) == os.path.normcase(base):
+        return base
+    if not os.path.normcase(parent).startswith(
+            os.path.normcase(base + os.sep)):
+        raise errors.PolicyError("parent directory escapes worktree")
+    os.makedirs(parent, exist_ok=True)
+    real_parent = os.path.realpath(parent)
+    if not os.path.normcase(real_parent).startswith(
+            os.path.normcase(base + os.sep)):
+        raise errors.PolicyError(
+            "parent directory escaped worktree after creation")
+    return real_parent

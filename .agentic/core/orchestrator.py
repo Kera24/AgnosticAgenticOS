@@ -132,12 +132,41 @@ def apply_policy(cfg, order, trust_ledger, protected_patterns):
 # -- worker edit application (code-enforced) ---------------------------------
 
 def apply_edits(worktree, edits, allowed, forbidden, protected,
-                authorised_exceptions=None):
+                authorised_exceptions=None, log=None):
     """Apply worker edits with hard path enforcement. Returns violations;
-    on any violation nothing more is applied."""
+    on any violation nothing more is applied.
+
+    `allowed_paths` is the ONLY write boundary enforced here (never
+    `expected_paths` -- that is a separate acceptance contract checked
+    elsewhere, see `bootstrap_gate`). Three actions:
+      - "write": full-content file replace; creates missing authorised
+        parent directories via `gitops.ensure_parent_dir` (validated
+        before AND after creation).
+      - "delete": removes the file if present.
+      - "mkdir": creates an empty directory via `gitops.safe_makedirs`
+        (its own full allowed_paths + protected-path check) -- for a
+        task whose contract requires a directory to exist with no file
+        in it yet (e.g. a bare scaffold placeholder)."""
+    log = log or (lambda event: None)
     violations = []
     for edit in edits:
         rel = edit.get("path", "")
+        action = edit.get("action")
+        if action == "mkdir":
+            # a bare directory path (e.g. "src") legitimately does NOT
+            # match a file-shaped allowed_paths glob like "src/**" under
+            # plain fnmatch -- `safe_makedirs` does its own
+            # directory-aware allowed_paths + protected-path check
+            # (`directory_is_allowed`), so `check_paths` (built for file
+            # paths) is skipped here rather than producing a false
+            # "outside allowed_paths" violation.
+            try:
+                gitops.safe_makedirs(worktree, rel, allowed, protected,
+                                     authorised_exceptions=authorised_exceptions)
+                log({"event": "directory_created", "path": rel})
+            except errors.PolicyError as exc:
+                violations.append(exc.detail)
+            continue
         bad = gitops.check_paths([rel], allowed, forbidden, protected,
                                  authorised_exceptions=authorised_exceptions)
         if bad:
@@ -148,14 +177,18 @@ def apply_edits(worktree, edits, allowed, forbidden, protected,
         except errors.PolicyError as exc:
             violations.append(exc.detail)
             continue
-        if edit.get("action") == "delete":
+        if action == "delete":
             if os.path.exists(full):
                 os.remove(full)
         else:
             if looks_like_secret(edit.get("content") or ""):
                 violations.append("edit to %s appears to embed a secret" % rel)
                 continue
-            os.makedirs(os.path.dirname(full) or worktree, exist_ok=True)
+            try:
+                gitops.ensure_parent_dir(worktree, full)
+            except errors.PolicyError as exc:
+                violations.append(exc.detail)
+                continue
             with open(full, "w", encoding="utf-8", newline="") as fh:
                 fh.write(edit.get("content") or "")
     return violations
@@ -386,10 +419,14 @@ def run_tick(cfg=None, dry_run=False, invoker=None, transport=None, env=None,
 
     violations = apply_edits(worktree, wout.get("edits", []),
                              order["allowed_paths"],
-                             order.get("forbidden_paths", []), protected)
+                             order.get("forbidden_paths", []), protected,
+                             log=log)
     gitops.stage_all(worktree)
     lines = gitops.changed_lines(worktree)
-    files = gitops.changed_files(worktree)
+    # tool-generated artefacts (__pycache__, .pytest_cache, ...) are a
+    # side effect of running deterministic checks, never a worker edit --
+    # see gitops.filter_tool_artifacts / core.project's matching fix.
+    files = gitops.filter_tool_artifacts(gitops.changed_files(worktree))
     violations += gitops.check_paths(files, order["allowed_paths"],
                                      order.get("forbidden_paths", []), protected)
     limit_lines = min(int(order["maximum_changed_lines"] or 0) or 10**9,

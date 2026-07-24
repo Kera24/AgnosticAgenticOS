@@ -14,7 +14,11 @@ import os
 import re
 
 from . import backends, bootstrap_gate, capacity as capacity_mod
-from . import config as config_mod, decision_policy
+from . import config as config_mod, contract as contract_mod
+from . import decision_policy, execengine, failures
+from . import inventory as inventory_mod
+from . import parallel as parallel_mod
+from . import preflight as preflight_mod
 from . import errors, gate, gitops, logs, notify, projstate
 from .breaker import BreakerBoard
 from .orchestrator import (apply_edits, load_prompt, _schema, _snapshot)
@@ -111,13 +115,24 @@ def make_caller(cfg, ledger, board, overrides=None, runner=None,
                                        "role": role,
                                        "detail": str(exc)[:300]})
             return backends.error_result(chain[0], role, err)
-        return backends.invoke_backend(
+        result = backends.invoke_backend(
             cfg, chain[0], role, rendered, input_data=None,
             output_schema=schema, workspace=workspace,
             permissions=permissions, timeout=timeout, ledger=ledger,
             board=board, fallback_chain=chain[1:], runner=runner,
             transport=transport, which=which, env=env, log=log,
             prompt_builder=build_prompt)
+        try:   # honest provider-cache telemetry (Phase 2.F) -- best-effort,
+               # never allowed to affect the actual call result
+            from . import cachestore
+            cache_key = cachestore.compute_cache_key(
+                role=role, backend=result.get("backend"),
+                model=result.get("model"))
+            cachestore.CacheStore(memory_dir).record_provider_cache_observation(
+                cache_key, result.get("backend_type"), result.get("usage"))
+        except Exception:   # noqa: BLE001
+            pass
+        return result
     return call
 
 
@@ -145,6 +160,24 @@ def project_start(cfg, plan_path, caller=None, overrides=None, clock=None,
         plan = fh.read()
     ledger, board, scheduler, caller, log = _context(
         cfg, p["memory"], overrides=overrides, caller=caller, clock=clock, **kw)
+    # capability inventory (Phase 1.B): built once, before architecture,
+    # and persisted -- the architect and every later cycle read it back
+    # instead of re-discovering unchanged repository facts each time.
+    try:
+        from . import registry as _registry_mod
+        registry_home = _registry_mod.ProjectRegistry().home
+    except Exception:   # noqa: BLE001
+        registry_home = None
+    try:
+        inv = inventory_mod.build_inventory(
+            cfg, p["root"], p["agentic"], memory_dir=p["memory"],
+            registry_home=registry_home)
+        inventory_mod.save(p["agentic"], inv)
+        log({"event": "inventory_built",
+             "languages": list((inv.get("observed") or {})
+                               .get("languages", {}).keys())})
+    except Exception as exc:   # noqa: BLE001 -- inventory is best-effort
+        log({"event": "inventory_build_failed", "detail": str(exc)[:200]})
     snapshot = _snapshot(p["root"], ["**"])
     result = caller("architect", load_prompt("architect.md", shared=False),
                     {"plan": plan, "repository_files": snapshot["file_list"]},
@@ -289,6 +322,9 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
     lock = projstate.ProjectLock(a)
     if not lock.acquire():
         return {"status": "locked", "detail": "another cycle is running"}
+    if lock.broke_stale_lock:
+        log({"event": "stale_lock_recovered", "run_id": run_id,
+             "age_seconds": lock.broke_stale_lock_age_seconds})
     from . import taskspace
     lease = taskspace.ProjectLease(a, cfg.get("project", {}).get("name"),
                                    clock=clock)
@@ -310,7 +346,8 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
 
 
 def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
-                  outcome, tokens, started_at, detail="", retry_after=None):
+                  outcome, tokens, started_at, detail="", retry_after=None,
+                  failure_class=None):
     duration = int((_dt.datetime.now() - started_at).total_seconds())
     ledger.record_cycle(run_id, backend or "-",
                         (task or {}).get("skill") or (task or {}).get("id", "-"),
@@ -318,6 +355,11 @@ def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
                         tokens, duration, outcome)
     cool_outcome = outcome if outcome in ("success", "rate_limit",
                                           "usage_limit") else "failure"
+    # a platform-classified failure (see core.failures) never escalates
+    # the ordinary model/provider failure-cooldown streak -- it gets its
+    # own short, flat cooldown instead (scheduler.cooldown_breakdown).
+    cool_outcome = failures.cooling_outcome_for(failure_class, cool_outcome) \
+        or cool_outcome
     until = scheduler.start_cooling(cool_outcome,
                                     retry_after_seconds=retry_after)
     _remember(cfg, p["memory"], "cycle_outcome",
@@ -325,15 +367,18 @@ def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
               (detail or outcome)[:400], task_id=(task or {}).get("id"),
               cycle_id=run_id, source="cycle",
               importance=0.6 if outcome == "success" else 0.7)
+    cooling_detail = scheduler.state.get("cooling_detail")
     log({"event": "cycle_finished", "run_id": run_id, "outcome": outcome,
          "detail": redact(str(detail))[:300],
-         "cooling_until": until.isoformat(timespec="seconds")})
+         "cooling_until": until.isoformat(timespec="seconds"),
+         "cooling_detail": cooling_detail})
     progress = projstate.refresh_progress(p["agentic"])
     from .knowledge import update_knowledge
     update_knowledge(cfg, p["agentic"], log)
     result = {"status": outcome, "run_id": run_id,
               "task": (task or {}).get("id"), "detail": detail,
               "cooling_until": until.isoformat(timespec="seconds"),
+              "cooling_detail": cooling_detail,
               "progress": progress}
     if notify.should_notify(cfg, "cycle_complete"):
         notify.notify(cfg, "cycle_complete", "Cycle %s: %s"
@@ -379,6 +424,14 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                  "recovered": recovered})
     except Exception:   # noqa: BLE001 — recovery is best-effort
         pass
+    try:   # self-heal tasks stuck on the pre-fix expected_paths-as-
+           # allowlist contract bug (run 20260722-181213)
+        recovered_contract = bootstrap_gate.recover_expected_paths_contract_bug(a)
+        if recovered_contract:
+            log({"event": "expected_paths_contract_bug_recovered",
+                 "run_id": run_id, "recovered": recovered_contract})
+    except Exception:   # noqa: BLE001 — recovery is best-effort
+        pass
     try:   # auto-resolve reversible technical choices left over from a
            # project started before this policy existed
         resolved = decision_policy.auto_resolve_reversible_decisions(
@@ -392,6 +445,19 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     if scheduler.state.get("project_status") == "blocked_on_human" and \
             not projstate.open_blockers(a, human_only=True):
         scheduler.set_project_status("in_progress")
+    try:   # refresh the capability inventory ONLY if it's actually stale
+        if inventory_mod.is_stale(a, p["root"]):
+            from . import registry as _registry_mod
+            try:
+                registry_home = _registry_mod.ProjectRegistry().home
+            except Exception:   # noqa: BLE001
+                registry_home = None
+            inventory_mod.ensure_inventory(
+                cfg, p["root"], a, memory_dir=p["memory"],
+                registry_home=registry_home, force=True)
+            log({"event": "inventory_refreshed", "run_id": run_id})
+    except Exception:   # noqa: BLE001 — inventory refresh is best-effort
+        pass
 
     task = projstate.next_task(a)
     if task is None:
@@ -432,7 +498,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     projstate.update_task(a, task["id"], status="in_progress")
 
     def fail(outcome, detail, retry_after=None, block=False,
-             blocking_reason=None, human_only=False, code=None):
+             blocking_reason=None, human_only=False, code=None,
+             failure_class=None):
         from . import taskspace as _ts
         _ts.release_claim(a, task["id"])   # failed worktree stays as evidence
         projstate.update_task(
@@ -452,9 +519,13 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                       (blocking_reason or detail)[:400],
                       task_id=task["id"], cycle_id=run_id,
                       source="cycle", importance=0.8)
+        if failure_class:
+            log({"event": "failure_classified", "run_id": run_id,
+                 "task_id": task["id"], "failure_class": failure_class,
+                 "platform_class": failures.is_platform_class(failure_class)})
         return _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task,
                              backend, outcome, 0, started_at, detail,
-                             retry_after)
+                             retry_after, failure_class=failure_class)
 
     # conductor -------------------------------------------------------------------
     project_worktree = ensure_project_worktree(cfg, p)
@@ -485,7 +556,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                                        authorised_exceptions):
             return fail("failure", "work order grants protected path %s"
                         % pattern, block=True,
-                        blocking_reason="protected path in work order")
+                        blocking_reason="protected path in work order",
+                        code=projstate.BLOCKER_CODE_POLICY_DENIED,
+                        failure_class=failures.WORKSPACE_POLICY_DENIED)
 
     worker_role = _worker_role(task, order)
     order = _enrich_work_order_safe(cfg, p, a, order, task, worker_role,
@@ -498,13 +571,104 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     from . import taskspace
     try:
         taskspace.claim_paths(a, task["id"], order.get("allowed_paths", [])
-                              + list(task.get("expected_paths") or []),
+                              + bootstrap_gate.expected_path_strings(task),
                               run_id=run_id)
     except errors.PolicyError as exc:
         return fail("failure", "ownership conflict: %s" % exc.detail,
-                    block=True, blocking_reason=exc.detail[:200])
+                    block=True, blocking_reason=exc.detail[:200],
+                    failure_class=failures.PROJECT_DEPENDENCY_MISSING)
     worktree = taskspace.create_task_worktree(p["root"], a, task["id"],
                                               PROJECT_BRANCH)
+    # overwritten below only when Phase 5 parallel candidates ran and a
+    # candidate OTHER than this primary worktree won -- the single-agent
+    # path (the overwhelming majority of tasks) never touches this.
+    integration_task_id = task["id"]
+    # True only when parallel candidates tied on every ranking signal:
+    # the tie-broken winner (lowest-index candidate) still goes through
+    # security review and checks normally, but the final merge into
+    # agentic/project is held for a human decision instead of guessed.
+    integration_requires_human = False
+    # revalidate-before-regenerate (item 9): `create_task_worktree` resumes
+    # a preserved worktree from a previous, non-reverted failure (e.g. a
+    # task the coder itself blocked on, or one recovered from a since-fixed
+    # platform bug) rather than starting fresh. If it already has changes,
+    # give the EXISTING work a chance to pass the (now-current) checks
+    # before asking the model to redo it -- never discarded on first
+    # contact with a stale block.
+    #
+    # BUT only when that preserved content is still actually compatible
+    # with THIS cycle's work order: a fresh conductor call can legitimately
+    # narrow allowed_paths from a previous attempt, and a worker has no
+    # way to resolve that itself -- even a "delete" action requires the
+    # path to be in allowed_paths, so an out-of-scope leftover file is an
+    # unsolvable catch-22 for the model (observed live: run 20260723-225324
+    # against ollama-pilot). When preserved content no longer fits the
+    # current scope, the platform resets the worktree itself rather than
+    # handing the model an impossible cleanup task.
+    gitops.stage_all(worktree)
+    preserved_files = gitops.filter_tool_artifacts(
+        gitops.changed_files(worktree))
+    preserved_work = bool(preserved_files)
+    if preserved_work:
+        incompatible = gitops.check_paths(
+            preserved_files, order.get("allowed_paths", []),
+            order.get("forbidden_paths", []), protected,
+            authorised_exceptions=authorised_exceptions)
+        if incompatible:
+            log({"event": "preserved_work_incompatible_with_scope",
+                 "run_id": run_id, "task_id": task["id"],
+                 "reasons": incompatible[:5]})
+            _revert_worktree(worktree)
+            preserved_work = False
+        else:
+            log({"event": "revalidating_preserved_work", "run_id": run_id,
+                 "task_id": task["id"]})
+
+    # feasibility preflight (Phase 1.C) ------------------------------------------
+    # runs entirely in code, after the worktree exists but BEFORE the coder
+    # is ever invoked -- a platform_invalid/dependency_wait/human_required/
+    # credential_required result never consumes model capacity.
+    task_contract = contract_mod.build_task_contract(
+        task, order, cfg.get("project", {}).get("name"), run_id=run_id)
+    remaining_decisions = projstate.read_yaml(
+        a, "decisions.yaml", {}).get("human_decisions_needed", [])
+    preflight_result = preflight_mod.run_preflight(
+        task_contract, task, projstate.load_backlog(a), worktree, a,
+        decisions_needed=remaining_decisions, capacity_decision=decision,
+        backend=backend, inventory=inventory_mod.load(a))
+    log({"event": "preflight", "run_id": run_id, "task_id": task["id"],
+         "result": preflight_result["result"],
+         "checks": preflight_result["checks"]})
+    if not preflight_result["consumes_capacity"]:
+        result_kind = preflight_result["result"]
+        reason = "; ".join(c["detail"] for c in preflight_result["checks"]
+                           if not c["ok"]) or result_kind
+        if result_kind == preflight_mod.RESULT_HUMAN_REQUIRED:
+            return fail("failure", "preflight: %s" % reason, block=True,
+                        human_only=True,
+                        blocking_reason="preflight human_required: %s"
+                        % reason[:200],
+                        code=projstate.BLOCKER_CODE_GENUINE_HUMAN_DECISION,
+                        failure_class=failures.GENUINE_HUMAN_DECISION)
+        if result_kind == preflight_mod.RESULT_CREDENTIAL_REQUIRED:
+            return fail("failure", "preflight: %s" % reason, block=True,
+                        human_only=True,
+                        blocking_reason="preflight credential_required: %s"
+                        % reason[:200],
+                        code=projstate.BLOCKER_CODE_AUTHENTICATION_REQUIRED,
+                        failure_class=failures.PROVIDER_AUTHENTICATION)
+        if result_kind == preflight_mod.RESULT_DEPENDENCY_WAIT:
+            return fail("failure", "preflight: %s" % reason,
+                        failure_class=failures.PROJECT_DEPENDENCY_MISSING)
+        # platform_invalid / replan_required: a genuine platform-side
+        # contract/capability problem -- block for a human/architect to
+        # fix, never silently spin.
+        return fail("failure", "preflight %s: %s" % (result_kind, reason),
+                    block=True,
+                    blocking_reason=("preflight %s: %s"
+                                     % (result_kind, reason))[:200],
+                    code=projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+                    failure_class=failures.TASK_CONTRACT_INVALID)
 
     # coder + deterministic checks + bounded repair/review loops ------------------
     # Two separate bounds (Phase 7): deterministic repair attempts
@@ -526,161 +690,228 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     feedback = None
     used_backend = backend
     total_tokens = 0
-    while True:
-        coder_calls += 1
-        coder_input = {"work_order": order}
-        if feedback:
-            coder_input.update(feedback)   # structured repair/handoff packet
-        chain_now = coder_chain
-        if feedback and feedback.get("handoff"):
-            chain_now = feedback["handoff_chain"]
-        result = _invoke_coder(cfg, caller, coder_input, worktree, chain_now,
-                               role=worker_role)
-        if not result["ok"]:
-            kind = (result.get("error") or {}).get("kind", "?")
-            retry = (result.get("capacity") or {}).get("retry_after_seconds")
-            if kind in ("rate_limit", "usage_limit"):
-                # backend down mid-task: structured handoff to the next
-                # backend, each backend tried at most once
-                failed_backends.add(result.get("backend"))
-                remaining = [b for b in coder_chain
-                             if b not in failed_backends]
-                if remaining:
-                    feedback = _handoff_payload(order, worktree, gate_result,
-                                                remaining)
-                    used_backend = remaining[0]
-                    log({"event": "handoff", "run_id": run_id,
-                         "from": result.get("backend"), "to": remaining[0]})
-                    continue
-            return fail(kind if kind in ("rate_limit", "usage_limit")
-                        else "failure", "coder failed: %s" % kind, retry)
-        used_backend = result.get("backend", used_backend)
-        usage = result.get("usage") or {}
-        total_tokens += (usage.get("input_tokens") or 0) + \
-                        (usage.get("output_tokens") or 0)
-        if result.get("blocked"):
-            return fail("failure", result.get("blocker") or "coder blocked",
-                        block=True, blocking_reason=result.get("blocker"))
-
-        violations = _apply_and_check_paths(cfg, result, order, worktree,
-                                            protected, authorised_exceptions)
-        if violations:
-            det_attempts += 1
-            log({"event": "scope_violation", "run_id": run_id,
-                 "violations": violations[:5]})
-            if det_attempts >= max_det_attempts:
-                _revert_worktree(worktree)
-                return fail("failure", "scope violations: %s"
-                            % "; ".join(violations[:3]), block=True,
-                            blocking_reason="repeated scope violations")
-            feedback = {"failing_checks": [],
-                        "scope_violations": violations,
-                        "instruction": "revert or move out-of-scope changes"}
-            continue
-
-        gate_result = gate.run_checks(cfg, worktree,
-                                      os.path.join(run_dir,
-                                                   "checks-%d" % coder_calls))
-        if gate_result["no_checks"]:
-            # "no checks configured" is NEVER a pass -- but a task the
-            # architect itself classified as bootstrap/scaffolding, in a
-            # project whose backlog already commits to a later test-setup
-            # task, gets a deterministic structural gate instead of an
-            # instant block. Its result is folded into the SAME repair
-            # loop below (never a bare pass): it reports
-            # tests=not_configured_yet, never tests=passed, and any
-            # failure gets the normal repair attempts before blocking --
-            # generated work is no longer discarded on first contact.
-            eligible, reason = bootstrap_gate.bootstrap_eligible(
-                task, projstate.load_backlog(a),
-                bootstrap_gate.decisions_text(a))
-            if eligible:
-                gate_result = bootstrap_gate.run_structural_checks(
-                    task, worktree,
-                    os.path.join(run_dir,
-                                 "checks-%d-bootstrap" % coder_calls))
-                log({"event": "bootstrap_structural_gate", "run_id": run_id,
-                     "task_id": task["id"], "ok": gate_result["ok"],
-                     "tests": gate_result["tests"]})
+    # execution-engine selection (Phase 4): decided ONCE per cycle, not
+    # per repair attempt -- native today (Orca is opt-in, disabled by
+    # default, and falls back to native automatically when absent or
+    # incompatible; see core.execengine). Everything else in this loop
+    # (task selection, contract, allowed_paths, verification, review,
+    # completion, memory, cooling, recovery) is unaffected by this
+    # choice -- the engine only ever produces the coder's edits.
+    try:
+        engine, engine_decision = execengine.select_engine(cfg, caller=caller)
+    except execengine.EngineUnavailable as exc:
+        # only reachable when an admin explicitly disabled
+        # fallback_to_native AND orca is genuinely unavailable -- a
+        # deliberate hard-fail choice, never the default behaviour.
+        return fail("failure", "execution engine unavailable: %s" % exc,
+                    block=True,
+                    blocking_reason=("execution engine unavailable: %s"
+                                     % exc)[:200],
+                    failure_class=failures.PLATFORM_CAPABILITY_MISSING)
+    log({"event": "execution_engine_selected", "run_id": run_id,
+        "task_id": task["id"], **engine_decision})
+    parallel_n, parallel_signals = parallel_mod.decide_agent_count(
+        task, cfg)
+    if parallel_n <= 1:
+        while True:
+            coder_calls += 1
+            if coder_calls == 1 and preserved_work:
+                # skip the coder entirely this pass -- let the checks below
+                # run against what's already there
+                result = {"ok": True, "backend": used_backend, "edits": None,
+                          "blocked": False, "blocker": None, "usage": {}}
             else:
-                _revert_worktree(worktree)
-                # a single add_blocker call (inside fail()) -- the
-                # pre-fix duplicate (one human_only=True blocker recorded
-                # here PLUS a second human_only=False one from fail()'s
-                # own add_blocker) is exactly the bug the live pilot hit.
-                return fail(
-                    "failure", "zero deterministic checks: blocking",
-                    block=True, human_only=True,
-                    blocking_reason=bootstrap_gate.NO_CHECKS_HUMAN_REASON,
-                    code=bootstrap_gate.DETERMINISTIC_CHECKS_MISSING_CODE)
-        if not gate_result["ok"]:
-            failing = [r for r in gate_result["results"]
-                       if r["mandatory"] and not r["passed"]]
-            fingerprint = _failure_fingerprint(failing, worktree)
-            if fingerprint in seen_fingerprints:
-                _revert_worktree(worktree)
-                log({"event": "repeated_identical_failure",
-                     "run_id": run_id, "fingerprint": fingerprint})
-                return fail("failure",
-                            "repeated identical failure — stopping early",
-                            block=True,
-                            blocking_reason="repeated identical failure "
-                                            "(same diff, same errors)")
-            seen_fingerprints.add(fingerprint)
-            det_attempts += 1
-            log({"event": "gate_failed", "run_id": run_id,
-                 "attempt": det_attempts,
-                 "failing": [r["name"] for r in failing]})
-            if det_attempts >= max_det_attempts:
-                _revert_worktree(worktree)
-                return fail("failure",
-                            "deterministic checks failing after %d attempts"
-                            % det_attempts, block=True,
-                            blocking_reason="repair attempts exhausted")
-            feedback = {"failing_checks":
-                        [{"name": r["name"], "detail": r["detail"][:400]}
-                         for r in failing],
-                        "instruction": "make the failing checks pass; do not "
-                                       "weaken or delete tests"}
-            continue
+                coder_input = {"work_order": order}
+                if feedback:
+                    coder_input.update(feedback)   # structured repair/handoff packet
+                chain_now = coder_chain
+                if feedback and feedback.get("handoff"):
+                    chain_now = feedback["handoff_chain"]
+                session = engine.launch_agent(execengine.SessionRequest(
+                    run_id=run_id, task_id=task["id"], worktree=worktree,
+                    role=worker_role, coder_input=coder_input,
+                    chain=chain_now))
+                result = session.to_legacy_dict()
+            if not result["ok"]:
+                kind = (result.get("error") or {}).get("kind", "?")
+                retry = (result.get("capacity") or {}).get("retry_after_seconds")
+                if kind in ("rate_limit", "usage_limit"):
+                    # backend down mid-task: structured handoff to the next
+                    # backend, each backend tried at most once
+                    failed_backends.add(result.get("backend"))
+                    remaining = [b for b in coder_chain
+                                 if b not in failed_backends]
+                    if remaining:
+                        feedback = _handoff_payload(order, worktree, gate_result,
+                                                    remaining)
+                        used_backend = remaining[0]
+                        log({"event": "handoff", "run_id": run_id,
+                             "from": result.get("backend"), "to": remaining[0]})
+                        continue
+                return fail(kind if kind in ("rate_limit", "usage_limit")
+                            else "failure", "coder failed: %s" % kind, retry)
+            used_backend = result.get("backend", used_backend)
+            usage = result.get("usage") or {}
+            total_tokens += (usage.get("input_tokens") or 0) + \
+                            (usage.get("output_tokens") or 0)
+            if result.get("blocked"):
+                return fail("failure", result.get("blocker") or "coder blocked",
+                            block=True, blocking_reason=result.get("blocker"))
 
-        # QA review (independent, fresh context) --------------------------------
-        qa_input = _review_input(order, worktree, gate_result, task)
-        qa = caller("qa", load_prompt("qa-review.md", shared=False), qa_input,
-                    schema=_schema("verification.schema.json"),
-                    workspace=worktree, permissions="read")
-        qa_out = qa["structured_output"] if qa["ok"] else None
-        verdict = (qa_out or {}).get("verdict", "uncertain")
-        log({"event": "qa_review", "run_id": run_id, "verdict": verdict})
-        if verdict != "pass":
-            _remember(cfg, p["memory"], "reviewer_finding",
-                      "QA %s on task %s" % (verdict, task["id"]),
-                      str((qa_out or {}).get("reason", verdict))[:400],
-                      task_id=task["id"], cycle_id=run_id, source="qa",
-                      importance=0.7)
-        if verdict == "pass" and (qa_out or {}).get(
-                "test_integrity_preserved", False):
-            break
-        review_rounds += 1
-        if review_rounds > max_review_rounds:
-            # repeated disagreement escalates to the orchestrator: the task
-            # blocks with the reviewer's reason; a human decides
-            _revert_worktree(worktree)
-            log({"event": "review_escalation", "run_id": run_id,
-                 "rounds": review_rounds})
-            return fail("failure", "QA verdict %s after %d review rounds"
-                        % (verdict, review_rounds), block=True,
-                        blocking_reason="QA: %s"
-                        % str((qa_out or {}).get("reason", verdict))[:200])
-        # repair packet: the reviewer's structured findings only — never
-        # the reviewer's whole conversation
-        feedback = {"failing_checks": [],
-                    "qa_findings": (qa_out or {}).get("reason", "qa failed"),
-                    "required_repairs": (qa_out or {}).get(
-                        "required_repairs") or [],
-                    "review_findings": (qa_out or {}).get("findings") or [],
-                    "instruction": "address the QA findings within scope"}
-        continue
+            violations = _apply_and_check_paths(cfg, result, order, worktree,
+                                                protected, authorised_exceptions,
+                                                log=log)
+            if violations:
+                det_attempts += 1
+                log({"event": "scope_violation", "run_id": run_id,
+                     "violations": violations[:5]})
+                if det_attempts >= max_det_attempts:
+                    _revert_worktree(worktree)
+                    return fail("failure", "scope violations: %s"
+                                % "; ".join(violations[:3]), block=True,
+                                blocking_reason="repeated scope violations")
+                feedback = {"failing_checks": [],
+                            "scope_violations": violations,
+                            "instruction": "revert or move out-of-scope changes"}
+                continue
+
+            gate_result = gate.run_checks(cfg, worktree,
+                                          os.path.join(run_dir,
+                                                       "checks-%d" % coder_calls))
+            if gate_result["no_checks"]:
+                # "no checks configured" is NEVER a pass -- but a task the
+                # architect itself classified as bootstrap/scaffolding, in a
+                # project whose backlog already commits to a later test-setup
+                # task, gets a deterministic structural gate instead of an
+                # instant block. Its result is folded into the SAME repair
+                # loop below (never a bare pass): it reports
+                # tests=not_configured_yet, never tests=passed, and any
+                # failure gets the normal repair attempts before blocking --
+                # generated work is no longer discarded on first contact.
+                eligible, reason = bootstrap_gate.bootstrap_eligible(
+                    task, projstate.load_backlog(a),
+                    bootstrap_gate.decisions_text(a))
+                if eligible:
+                    gate_result = bootstrap_gate.run_structural_checks(
+                        task, worktree,
+                        os.path.join(run_dir,
+                                     "checks-%d-bootstrap" % coder_calls))
+                    log({"event": "bootstrap_structural_gate", "run_id": run_id,
+                         "task_id": task["id"], "ok": gate_result["ok"],
+                         "tests": gate_result["tests"]})
+                else:
+                    _revert_worktree(worktree)
+                    # a single add_blocker call (inside fail()) -- the
+                    # pre-fix duplicate (one human_only=True blocker recorded
+                    # here PLUS a second human_only=False one from fail()'s
+                    # own add_blocker) is exactly the bug the live pilot hit.
+                    return fail(
+                        "failure", "zero deterministic checks: blocking",
+                        block=True, human_only=True,
+                        blocking_reason=bootstrap_gate.NO_CHECKS_HUMAN_REASON,
+                        code=bootstrap_gate.DETERMINISTIC_CHECKS_MISSING_CODE,
+                        failure_class=failures.PLATFORM_CAPABILITY_MISSING)
+            if not gate_result["ok"]:
+                failing = [r for r in gate_result["results"]
+                           if r["mandatory"] and not r["passed"]]
+                fingerprint = _failure_fingerprint(failing, worktree)
+                if fingerprint in seen_fingerprints:
+                    _revert_worktree(worktree)
+                    log({"event": "repeated_identical_failure",
+                         "run_id": run_id, "fingerprint": fingerprint})
+                    return fail("failure",
+                                "repeated identical failure — stopping early",
+                                block=True,
+                                blocking_reason="repeated identical failure "
+                                                "(same diff, same errors)")
+                seen_fingerprints.add(fingerprint)
+                det_attempts += 1
+                log({"event": "gate_failed", "run_id": run_id,
+                     "attempt": det_attempts,
+                     "failing": [r["name"] for r in failing]})
+                if det_attempts >= max_det_attempts:
+                    _revert_worktree(worktree)
+                    return fail("failure",
+                                "deterministic checks failing after %d attempts"
+                                % det_attempts, block=True,
+                                blocking_reason="repair attempts exhausted")
+                feedback = {"failing_checks":
+                            [{"name": r["name"], "detail": r["detail"][:400]}
+                             for r in failing],
+                            "instruction": "make the failing checks pass; do not "
+                                           "weaken or delete tests"}
+                continue
+
+            # QA review (independent, fresh context) --------------------------------
+            qa_input = _review_input(order, worktree, gate_result, task)
+            qa = caller("qa", load_prompt("qa-review.md", shared=False), qa_input,
+                        schema=_schema("verification.schema.json"),
+                        workspace=worktree, permissions="read")
+            qa_out = qa["structured_output"] if qa["ok"] else None
+            verdict = (qa_out or {}).get("verdict", "uncertain")
+            log({"event": "qa_review", "run_id": run_id, "verdict": verdict})
+            if verdict != "pass":
+                _remember(cfg, p["memory"], "reviewer_finding",
+                          "QA %s on task %s" % (verdict, task["id"]),
+                          str((qa_out or {}).get("reason", verdict))[:400],
+                          task_id=task["id"], cycle_id=run_id, source="qa",
+                          importance=0.7)
+            if verdict == "pass" and (qa_out or {}).get(
+                    "test_integrity_preserved", False):
+                break
+            review_rounds += 1
+            if review_rounds > max_review_rounds:
+                # repeated disagreement escalates to the orchestrator: the task
+                # blocks with the reviewer's reason; a human decides
+                _revert_worktree(worktree)
+                log({"event": "review_escalation", "run_id": run_id,
+                     "rounds": review_rounds})
+                return fail("failure", "QA verdict %s after %d review rounds"
+                            % (verdict, review_rounds), block=True,
+                            blocking_reason="QA: %s"
+                            % str((qa_out or {}).get("reason", verdict))[:200])
+            # repair packet: the reviewer's structured findings only — never
+            # the reviewer's whole conversation
+            feedback = {"failing_checks": [],
+                        "qa_findings": (qa_out or {}).get("reason", "qa failed"),
+                        "required_repairs": (qa_out or {}).get(
+                            "required_repairs") or [],
+                        "review_findings": (qa_out or {}).get("findings") or [],
+                        "instruction": "address the QA findings within scope"}
+            continue
+    else:
+        log({"event": "parallel_candidates_planned",
+             "run_id": run_id, "task_id": task["id"],
+             "count": parallel_n, "signals": parallel_signals})
+        outcome = parallel_mod.run_candidates(
+            cfg, caller, engine, task, order, worker_role, p["root"],
+            a, PROJECT_BRANCH, coder_chain, run_id, run_dir, protected,
+            authorised_exceptions, worktree, log, load_prompt, _schema,
+            _review_input, _apply_and_check_paths)
+        if outcome["winner"] is None:
+            return fail("failure",
+                        "all parallel candidates failed: %s"
+                        % outcome["reasoning"], block=True,
+                        blocking_reason=(
+                            "parallel candidates exhausted: %s"
+                            % outcome["reasoning"])[:200])
+        # A tied/ambiguous ranking still yields a (deterministically
+        # tie-broken) winner that goes on to security review and checks
+        # exactly like any other candidate -- ambiguity only ever holds
+        # back the final git merge below, never the whole task, and
+        # never the security review that evidence should inform.
+        integration_requires_human = not outcome["integration_allowed"]
+        winner = outcome["winner"]
+        worktree = winner["worktree"]
+        gate_result = winner["gate_result"]
+        qa_out = winner["qa_out"]
+        used_backend = winner["backend"]
+        integration_task_id = winner["candidate_id"]
+        log({"event": "parallel_winner_selected", "run_id": run_id,
+             "task_id": task["id"],
+             "winner": winner["candidate_id"],
+             "integration_requires_human": integration_requires_human,
+             "reasoning": outcome["reasoning"]})
 
     # conditional security review ---------------------------------------------------
     changed = gitops.changed_files(worktree)
@@ -716,17 +947,32 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         _revert_worktree(worktree)
         return fail("failure", "diff appears to contain a secret", block=True,
                     blocking_reason="possible secret in diff")
+    if integration_requires_human:
+        # candidates tied on every ranking signal: checks and security
+        # review already passed above (kept as evidence on the tie-broken
+        # winner's own worktree/branch, never deleted), but auto-merging
+        # a guess is never acceptable -- a human picks which preserved
+        # candidate branch actually becomes agentic/project.
+        return fail(
+            "failure", "parallel candidate selection ambiguous: %s"
+            % outcome["reason"], block=True, human_only=True,
+            blocking_reason=("parallel selection ambiguous, merge held "
+                             "for human decision: %s"
+                             % outcome["reason"])[:200],
+            code=projstate.BLOCKER_CODE_GENUINE_HUMAN_DECISION,
+            failure_class=failures.GENUINE_HUMAN_DECISION)
     message = "agentic cycle %s: %s (%s)" % (run_id, task["id"],
                                              order["item"][:60])
     gitops.commit_all(worktree, message)
     try:
         taskspace.integrate_task(p["root"], project_worktree, worktree,
-                                 task["id"], message)
+                                 integration_task_id, message)
     except errors.PolicyError as exc:
         # dirty target or merge conflict: task worktree kept as evidence
         return fail("failure", "integration failed: %s" % exc.detail,
                     block=True, blocking_reason=exc.detail[:200])
-    taskspace.cleanup_task_worktree(p["root"], a, task["id"], success=True)
+    taskspace.cleanup_task_worktree(p["root"], a, integration_task_id,
+                                    success=True)
     _index_project(cfg, project_worktree, p["memory"], log, full=False,
                    changed=changed)
     _record_capability_evidence_safe(a, order, task, gate_result, log,
@@ -759,7 +1005,7 @@ def _worker_role(task, order):
     kind = str((task or {}).get("kind") or "").lower()
     if kind in ("ui", "frontend", "ui_designer", "design"):
         return "ui_designer"
-    paths = " ".join((task or {}).get("expected_paths", [])
+    paths = " ".join(bootstrap_gate.expected_path_strings(task)
                      + (order or {}).get("allowed_paths", [])).lower()
     if any(hint in paths for hint in UI_PATH_HINTS):
         return "ui_designer"
@@ -906,16 +1152,23 @@ def _invoke_coder(cfg, caller, coder_input, worktree, chain, role="coder"):
 
 
 def _apply_and_check_paths(cfg, result, order, worktree, protected,
-                           authorised_exceptions=None):
+                           authorised_exceptions=None, log=None):
     if result.get("edits") is not None:
         violations = apply_edits(worktree, result["edits"],
                                  order["allowed_paths"],
                                  order.get("forbidden_paths", []), protected,
-                                 authorised_exceptions=authorised_exceptions)
+                                 authorised_exceptions=authorised_exceptions,
+                                 log=log)
     else:
         violations = []
     gitops.stage_all(worktree)
-    files = gitops.changed_files(worktree)
+    # tool-generated artefacts (__pycache__, .pytest_cache, node_modules/
+    # caches) are a side effect of running an EARLIER attempt's
+    # deterministic checks in this same reused worktree, never something
+    # the worker chose to write -- excluded before the scope-violation
+    # check ever sees them, or a passing repair attempt could be wrongly
+    # blocked by the previous attempt's own check output.
+    files = gitops.filter_tool_artifacts(gitops.changed_files(worktree))
     violations += gitops.check_paths(files, order["allowed_paths"],
                                      order.get("forbidden_paths", []),
                                      protected,
@@ -1035,9 +1288,14 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
                                   os.path.join(p["runs"], "final-audit"))
     checks["deterministic_checks_pass"] = gate_result["ok"] and \
         not gate_result["no_checks"]
-    status = gitops.run_git(["status", "--porcelain"], cwd=worktree,
-                            check=False).strip()
-    checks["no_uncommitted_changes"] = status == ""
+    # running the deterministic checks just above is itself what can
+    # leave __pycache__/.pytest_cache/etc behind in the worktree -- never
+    # a real "uncommitted change" the audit should fail on.
+    status_lines = gitops.run_git(["status", "--porcelain"], cwd=worktree,
+                                  check=False).strip().splitlines()
+    dirty_paths = [line[3:].strip() for line in status_lines if line]
+    dirty_paths = gitops.filter_tool_artifacts(dirty_paths)
+    checks["no_uncommitted_changes"] = not dirty_paths
     diff_all = gitops.run_git(["log", "-p", "--max-count=50",
                                PROJECT_BRANCH, "--", "."],
                               cwd=worktree, check=False)

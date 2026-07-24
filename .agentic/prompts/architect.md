@@ -22,7 +22,18 @@ project structure. You never implement application code.
    - `dependencies` (task ids that must be done first)
    - `risk` (low|medium|high), `security_relevant` (auth, input handling,
      SQL, uploads, payments, secrets, crypto, deployment => true)
-   - `expected_paths` (narrow globs), `expected_size` (small|medium|large)
+   - `expected_paths` — the REQUIRED deliverables (the acceptance
+     contract the coder is graded on), never a second write allowlist.
+     Prefer explicit entries: `{"path": "src/index.js", "type": "file",
+     "required": true, "non_empty": true}` or `{"path": "src", "type":
+     "directory", "required": true}`. Legacy plain strings still work: a
+     literal path, a trailing `/` for a directory, or a glob for
+     advisory "at least one file like this" matching. List ONLY the
+     actual deliverables here — normal scaffold-support files the coder
+     will also reasonably create (`.gitignore`, `README.md`, lockfiles,
+     `.editorconfig`, ...) do NOT belong in `expected_paths`; they only
+     need to be covered by `allowed_paths` below.
+   - `expected_size` (small|medium|large)
    - `acceptance_criteria` — verifiable statements
    - `deterministic_checks` — commands that prove the criteria (tests,
      build, lint). Prefer adding a test task before or with each feature.
@@ -54,7 +65,11 @@ Return ONLY one JSON object matching the architect schema:
   "milestones": [{"id": "m1-foundation", "title": "...", "description": "..."}],
   "backlog": [{"id": "t1-scaffold", "milestone": "m1-foundation",
                "description": "...", "dependencies": [], "risk": "low",
-               "security_relevant": false, "expected_paths": ["src/**"],
+               "security_relevant": false,
+               "expected_paths": [
+                 {"path": "src", "type": "directory", "required": true},
+                 {"path": "src/index.js", "type": "file",
+                  "required": true, "non_empty": true}],
                "expected_size": "medium",
                "acceptance_criteria": ["..."],
                "deterministic_checks": ["python -m pytest -q"],

@@ -52,6 +52,15 @@ Context intelligence:
   python .agentic/run context reindex
   python .agentic/run context explain <package-id>
 
+Prompt/context cache (Phase 2 -- artifact + result cache, separate from
+provider-native caching which is always on and unconditional):
+  python .agentic/run cache status
+  python .agentic/run cache inspect <key>
+  python .agentic/run cache explain <run-id>
+  python .agentic/run cache prune
+  python .agentic/run cache clear [--project <id>]
+  python .agentic/run cache verify
+
 Memory (progressive disclosure):
   python .agentic/run memory status|compact|export
   python .agentic/run memory search "<query>"
@@ -929,6 +938,54 @@ def cmd_context(cfg, args):
     return 2
 
 
+def cmd_cache(cfg, args):
+    """cache status | inspect <key> | explain <run-id> | prune |
+    clear [--project <id>] | verify
+
+    The application-level artifact/result cache (Phase 2) -- separate
+    from provider-native caching (Anthropic cache_control, OpenAI
+    automatic prefix caching), which is always active regardless of
+    this cache's state and is reported honestly via its own
+    provider_cache_reported/provider_cache_unknown telemetry (visible
+    in `cache status`)."""
+    from core.cachestore import CacheStore
+    cfg, memory = _apply_project_overlay(cfg, args)
+    store = CacheStore(memory)
+    sub = args.plan or "status"
+    extra = args.extra or []
+    if sub == "status":
+        _print(store.status())
+        return 0
+    if sub == "inspect":
+        if not extra:
+            print("usage: cache inspect <key>", file=sys.stderr)
+            return 2
+        entry = store.inspect(extra[0])
+        if entry is None:
+            print("no cache entry %r" % extra[0], file=sys.stderr)
+            return 1
+        _print(entry)
+        return 0
+    if sub == "explain":
+        if not extra:
+            print("usage: cache explain <run-id>", file=sys.stderr)
+            return 2
+        _print(store.explain(extra[0]))
+        return 0
+    if sub == "prune":
+        _print({"pruned": store.prune_expired()})
+        return 0
+    if sub == "clear":
+        _print({"cleared": store.clear()})
+        return 0
+    if sub == "verify":
+        result = store.verify()
+        _print(result)
+        return 0 if result["ok"] else 1
+    print("unknown cache subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_memory(cfg, args):
     """memory status | search "<q>" | timeline <id> | show <id...> |
     forget <id> | compact | export [path]"""
@@ -1234,7 +1291,7 @@ COMMANDS = {
     "project-status": cmd_project_status, "project-pause": cmd_project_pause,
     "project-review": cmd_project_review, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
-    "context": cmd_context, "memory": cmd_memory,
+    "context": cmd_context, "cache": cmd_cache, "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
     "project": cmd_project, "fleet": cmd_fleet, "mcp": cmd_mcp,
     "capability": cmd_capability, "plugin": cmd_plugin,
