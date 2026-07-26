@@ -114,6 +114,14 @@ Model Capability Registry + Hierarchical Orchestration (Phase 8/9):
 
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
+
+Forcing a single Phase-5 parallel candidate for one run (e.g. the native
+end-to-end acceptance fixture) -- never persisted to config.yaml/
+config.machine.yaml, in-memory for this process only:
+  python .agentic/run project-run --set parallelism.max_agents_global=1
+  (this is the existing `parallelism.max_agents_global` config
+  convention, applied via the existing generic --set override -- no
+  separate --parallelism/--max-candidates flag is needed or provided)
 """
 import argparse
 import json
@@ -535,13 +543,15 @@ def cmd_project(cfg, args):
                     "enabled": registry.get(pid)["enabled"]})
             return 0
         if sub == "recover":
-            # Standalone entry point for the same reconciliation
-            # run_cycle already does automatically at the top of every
-            # cycle (core.supervisor.recover_stale_owned_processes) --
-            # useful when a project is stuck (locked/lease_held) and you
-            # want to confirm/force reconciliation without waiting for
-            # the next scheduled cycle attempt.
-            from core.project import _recover_stale_owned_processes
+            # Standalone entry point for the full persisted-state recovery
+            # pipeline (core.recovery.run_recovery) -- the same stages
+            # run_cycle already runs automatically at the top of every
+            # cycle, plus stale-lease/aggregate-candidate-blocker/
+            # failure-streak/dependency/worktree reconciliation -- useful
+            # when a project is stuck (locked/lease_held/blocked on a
+            # since-fixed platform defect) and you want to confirm/force
+            # reconciliation without waiting for the next scheduled cycle.
+            from core.recovery import run_recovery
             from core.scheduler import Scheduler
             from core import logs as logs_mod
             proj_cfg = projectops.project_cfg_for(cfg, registry, record)
@@ -550,10 +560,9 @@ def cmd_project(cfg, args):
             scheduler = Scheduler(proj_cfg, memdir)
             log = lambda event: logs_mod.decision(
                 memdir, dict(event, source="project"))
-            recovered = _recover_stale_owned_processes(
-                proj_cfg, agentic_dir, record["root_path"], scheduler, None,
-                log)
-            _print({"project": pid, "recovered": recovered})
+            stages = run_recovery(proj_cfg, agentic_dir, record["root_path"],
+                                  scheduler, None, log)
+            _print({"project": pid, "recovery": stages})
             return 0
         if sub == "archive":
             _print(registry.archive(pid))

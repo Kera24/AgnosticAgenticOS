@@ -70,6 +70,14 @@
     "completion_evidence_requirements": {
       "type": "array", "items": {"type": "string"}
     },
+    "work_order_expected_outputs": {
+      "type": "array", "items": {"type": "string"},
+      "description": "The conductor's own work-order `expected_outputs` field (historically never read downstream) -- kept here purely as evidence for core.contract.find_work_order_divergences. Never merged into required_outputs: the backlog task's typed expected_paths stay the single canonical source the conductor must work within."
+    },
+    "acceptance_criteria_gaps": {
+      "type": "array", "items": {"type": "string"},
+      "description": "Soft evidence only (core.contract.find_acceptance_criteria_gaps) -- an acceptance criterion mentioning a file/directory-like path not covered by any typed required output. Never a dispatch gate."
+    },
     "built_at": {"type": "string"}
   }
 }

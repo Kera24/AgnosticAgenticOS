@@ -88,6 +88,16 @@ def run_preflight(contract, task, backlog, worktree, project_root,
                 "; ".join(contradictions) or "none found"):
         return _verdict(RESULT_PLATFORM_INVALID, checks)
 
+    # canonical-contract-divergence guard (item 3): the conductor's own
+    # work-order expected_outputs and every acceptance criterion must
+    # already be represented on the ONE compiled contract -- never
+    # silently reconciled downstream by the bootstrap validator/worker
+    # prompt each re-deriving their own view of "what's required".
+    divergences = contract_mod.find_work_order_divergences(contract)
+    if not check("work_order_matches_compiled_contract", not divergences,
+                "; ".join(divergences) or "no divergence"):
+        return _verdict(RESULT_PLATFORM_INVALID, checks)
+
     if not check("worktree_writable", os.access(worktree, os.W_OK),
                 worktree):
         return _verdict(RESULT_PLATFORM_INVALID, checks)
