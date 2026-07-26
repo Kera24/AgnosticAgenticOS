@@ -85,7 +85,7 @@ def test_select_engine_raises_when_fallback_disabled_and_orca_unavailable():
 def test_select_engine_uses_orca_when_available_and_compatible(monkeypatch):
     monkeypatch.setattr(execengine.shutil, "which",
                         lambda exe: "/fake/orca" if exe == "orca" else None)
-    fake_runner = lambda argv, cwd=None, timeout=30: {
+    fake_runner = lambda argv, cwd=None, timeout=30, **kw: {
         "exit_code": 0, "stdout": "orca version 2.3.1", "stderr": ""}
     cfg = {"execution": {"preferred_engine": "orca"},
           "orca": {"enabled": True, "executable": "orca",
@@ -117,7 +117,7 @@ def test_orca_not_installed_when_which_finds_nothing(monkeypatch):
 def test_orca_version_parsed_from_runner_output(monkeypatch):
     monkeypatch.setattr(execengine.shutil, "which",
                         lambda exe: "/fake/orca")
-    runner = lambda argv, cwd=None, timeout=30: {
+    runner = lambda argv, cwd=None, timeout=30, **kw: {
         "exit_code": 0, "stdout": "Orca CLI version 3.1.4 (build abc)\n",
         "stderr": ""}
     engine = execengine.OrcaExecutionEngine(
@@ -132,7 +132,7 @@ def test_orca_explicit_empty_supported_versions_never_compatible(monkeypatch):
     supported yet, even if installed with a detectable version -- never
     'assume the latest works'."""
     monkeypatch.setattr(execengine.shutil, "which", lambda exe: "/fake/orca")
-    runner = lambda argv, cwd=None, timeout=30: {
+    runner = lambda argv, cwd=None, timeout=30, **kw: {
         "exit_code": 0, "stdout": "1.0.0", "stderr": ""}
     engine = execengine.OrcaExecutionEngine(
         {}, executable="orca", supported_versions=[], runner=runner)
@@ -143,7 +143,7 @@ def test_orca_explicit_empty_supported_versions_never_compatible(monkeypatch):
 
 def test_orca_smoke_test_is_non_destructive(tmp_path, monkeypatch):
     monkeypatch.setattr(execengine.shutil, "which", lambda exe: "/fake/orca")
-    runner = lambda argv, cwd=None, timeout=30: {
+    runner = lambda argv, cwd=None, timeout=30, **kw: {
         "exit_code": 0, "stdout": "1.0.0", "stderr": ""}
     engine = execengine.OrcaExecutionEngine(
         {}, executable="orca", supported_versions=["1.0.0"], runner=runner)
@@ -174,7 +174,7 @@ def test_orca_launch_agent_parses_json_result_and_events(monkeypatch, tmp_path):
               "blocked": False, "usage": {"input_tokens": 12,
                                           "output_tokens": 4}}
 
-    def runner(argv, cwd=None, timeout=None):
+    def runner(argv, cwd=None, timeout=None, **kw):
         return {"exit_code": 0, "stdout": json.dumps(payload), "stderr": ""}
 
     engine = _compatible_orca(runner)
@@ -196,7 +196,7 @@ def test_orca_launch_agent_blocked_result(monkeypatch, tmp_path):
     payload = {"events": [], "edits": [], "blocked": True,
               "blocker": "missing credential"}
 
-    def runner(argv, cwd=None, timeout=None):
+    def runner(argv, cwd=None, timeout=None, **kw):
         return {"exit_code": 0, "stdout": json.dumps(payload), "stderr": ""}
 
     engine = _compatible_orca(runner)
@@ -216,7 +216,7 @@ def test_orca_malformed_output_becomes_raw_event_not_a_crash(monkeypatch,
     that isn't the declared --json shape becomes one opaque event."""
     monkeypatch.setattr(execengine.shutil, "which", lambda exe: "/fake/orca")
 
-    def runner(argv, cwd=None, timeout=None):
+    def runner(argv, cwd=None, timeout=None, **kw):
         return {"exit_code": 0, "stdout": "not json at all", "stderr": ""}
 
     engine = _compatible_orca(runner)
@@ -241,13 +241,16 @@ def test_orca_launch_agent_raises_unavailable_when_not_compatible(tmp_path):
 
 
 def test_orca_timeout_produces_execution_timeout_status(monkeypatch, tmp_path):
-    import subprocess
     monkeypatch.setattr(execengine.shutil, "which", lambda exe: "/fake/orca")
 
-    def runner(argv, cwd=None, timeout=None):
+    def runner(argv, cwd=None, timeout=None, **kw):
         if argv[1] == "--version":
             return {"exit_code": 0, "stdout": "1.0.0", "stderr": ""}
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout or 1)
+        # supervised runners (core.supervisor) never raise for a timeout
+        # -- they always return a dict with timed_out=True, so the
+        # timeout signal survives a bounded, guaranteed-to-return call
+        return {"exit_code": None, "stdout": "", "stderr": "timed out",
+               "timed_out": True}
 
     engine = execengine.OrcaExecutionEngine(
         {}, executable="orca", supported_versions=["1.0.0"], runner=runner)
@@ -336,7 +339,7 @@ def test_native_and_orca_produce_equivalent_validation_evidence(
     orca_repo = make_worktree("orca")
     payload = {"events": [], "edits": edits, "blocked": False}
 
-    def runner(argv, cwd=None, timeout=None):
+    def runner(argv, cwd=None, timeout=None, **kw):
         if argv[1] == "--version":
             return {"exit_code": 0, "stdout": "1.0.0", "stderr": ""}
         return {"exit_code": 0, "stdout": json.dumps(payload), "stderr": ""}

@@ -20,6 +20,7 @@ evidence, same retention policy as any other failed task worktree.
 """
 import os
 
+from . import failures
 from . import gate as gate_mod
 from . import gitops
 
@@ -87,6 +88,68 @@ def decide_agent_count(task, cfg):
     return min(2, cap), signals
 
 
+_BACKEND_ERROR_KIND_TO_CLASS = {
+    "rate_limit": (failures.PROVIDER_CAPACITY, "candidate_provider_capacity"),
+    "usage_limit": (failures.PROVIDER_CAPACITY, "candidate_provider_capacity"),
+    "authentication": (failures.PROVIDER_AUTHENTICATION,
+                       "candidate_provider_authentication"),
+    "timeout": (failures.EXECUTION_TIMEOUT, "candidate_execution_timeout"),
+    "provider_unavailable": (failures.PROVIDER_UNAVAILABLE,
+                            "candidate_provider_unavailable"),
+    "connection_error": (failures.PROVIDER_UNAVAILABLE,
+                         "candidate_provider_unavailable"),
+    "network_error": (failures.PROVIDER_UNAVAILABLE,
+                      "candidate_provider_unavailable"),
+}
+
+
+def _classify_disqualification(stage, detail=None):
+    """Structured cause for a disqualified candidate (item 1 of the
+    aggregate-blocker fix): every disqualification records
+    (failure_class, code, platform_owned, retryable) instead of only a
+    free-text reason, so an aggregate outcome can be classified from its
+    constituent causes -- never by re-parsing a concatenated string (see
+    `run_candidates`'s `candidate_failures` and `core.parallel_recovery`).
+    Nothing here is ever platform_owned=True: a genuinely platform-owned
+    candidate cause would require identifying a specific, already-fixed
+    platform defect, which -- for NEWLY observed disqualifications -- is
+    never inferred from free text (only legacy-blocker MIGRATION does
+    that; see core.parallel_recovery.reconstruct_legacy_candidate_failures)."""
+    if stage == "engine_error":
+        return failures.INFRASTRUCTURE_FAILURE, "candidate_engine_error", \
+            False, True
+    if stage == "coder_failed":
+        return _BACKEND_ERROR_KIND_TO_CLASS.get(
+            detail, (failures.MODEL_OUTPUT_INVALID, "candidate_coder_failed"))\
+            + (False, True)
+    if stage == "coder_blocked":
+        return failures.MODEL_OUTPUT_INVALID, "candidate_coder_blocked", \
+            False, True
+    if stage == "scope_violation":
+        return failures.MODEL_OUTPUT_INVALID, "candidate_scope_violation", \
+            False, True
+    if stage == "gate_no_checks":
+        return failures.DETERMINISTIC_CHECK_FAILED, \
+            "candidate_no_deterministic_checks", False, True
+    if stage == "gate_failed":
+        return failures.DETERMINISTIC_CHECK_FAILED, \
+            "candidate_deterministic_check_failed", False, True
+    return failures.MODEL_OUTPUT_INVALID, "candidate_disqualified", False, True
+
+
+def _disqualify(record, stage, reason, detail=None, evidence_ref=None):
+    record["disqualified"] = True
+    record["disqualify_reason"] = reason
+    failure_class, code, platform_owned, retryable = \
+        _classify_disqualification(stage, detail)
+    record["failure_class"] = failure_class
+    record["code"] = code
+    record["platform_owned"] = platform_owned
+    record["retryable"] = retryable
+    record["evidence_ref"] = evidence_ref
+    return record
+
+
 def _run_one_candidate(cfg, caller, engine, task, order, worker_role,
                        worktree, candidate_id, chain, run_id, run_dir,
                        protected, authorised_exceptions, log, load_prompt,
@@ -96,7 +159,9 @@ def _run_one_candidate(cfg, caller, engine, task, order, worker_role,
              "backend": chain[0] if chain else None, "disqualified": False,
              "disqualify_reason": None, "gate_result": None, "qa_out": None,
              "qa_verdict": "uncertain", "changed_files": [],
-             "lines_changed": 0, "acceptance_coverage": (0, 0)}
+             "lines_changed": 0, "acceptance_coverage": (0, 0),
+             "failure_class": None, "code": None, "platform_owned": False,
+             "retryable": True, "evidence_ref": None}
     try:
         session = engine.launch_agent(execengine.SessionRequest(
             run_id=run_id, task_id=candidate_id, worktree=worktree,
@@ -105,30 +170,25 @@ def _run_one_candidate(cfg, caller, engine, task, order, worker_role,
         result = session.to_legacy_dict()
     except Exception as exc:   # noqa: BLE001 -- one candidate's crash must
                                # never take the others (or the cycle) down
-        record["disqualified"] = True
-        record["disqualify_reason"] = "engine error: %s" % exc
         log({"event": "parallel_candidate_error", "run_id": run_id,
              "candidate_id": candidate_id, "detail": str(exc)[:300]})
-        return record
+        return _disqualify(record, "engine_error", "engine error: %s" % exc)
     if not result.get("ok"):
-        record["disqualified"] = True
-        record["disqualify_reason"] = "coder failed: %s" % (
-            (result.get("error") or {}).get("kind", "?"))
-        return record
+        kind = (result.get("error") or {}).get("kind", "?")
+        return _disqualify(record, "coder_failed",
+                           "coder failed: %s" % kind, detail=kind)
     record["backend"] = result.get("backend", record["backend"])
     if result.get("blocked"):
-        record["disqualified"] = True
-        record["disqualify_reason"] = result.get("blocker") or "coder blocked"
-        return record
+        return _disqualify(record, "coder_blocked",
+                           result.get("blocker") or "coder blocked")
     violations = apply_and_check_fn(cfg, result, order, worktree, protected,
                                     authorised_exceptions, log=log)
     if violations:
-        record["disqualified"] = True
-        record["disqualify_reason"] = "scope violations: %s" % \
-            "; ".join(violations[:3])
-        return record
-    gate_result = gate_mod.run_checks(
-        cfg, worktree, os.path.join(run_dir, "checks-%s" % candidate_id))
+        return _disqualify(record, "scope_violation",
+                           "scope violations: %s" % "; ".join(violations[:3]),
+                           evidence_ref=worktree)
+    checks_dir = os.path.join(run_dir, "checks-%s" % candidate_id)
+    gate_result = gate_mod.run_checks(cfg, worktree, checks_dir)
     record["gate_result"] = gate_result
     # Deliberately narrower than the single-agent path here: candidates
     # never get the bootstrap/structural-gate fallback or a repair loop
@@ -138,10 +198,11 @@ def _run_one_candidate(cfg, caller, engine, task, order, worker_role,
     # if none survive) decides the outcome, rather than silently
     # reintroducing the pre-Phase-3 "no checks = pass" gap.
     if gate_result.get("no_checks") or not gate_result.get("ok"):
-        record["disqualified"] = True
-        record["disqualify_reason"] = "deterministic checks failed" \
-            if not gate_result.get("no_checks") else "no deterministic checks"
-        return record
+        no_checks = gate_result.get("no_checks")
+        return _disqualify(
+            record, "gate_no_checks" if no_checks else "gate_failed",
+            "deterministic checks failed" if not no_checks
+            else "no deterministic checks", evidence_ref=checks_dir)
     record["changed_files"] = gitops.changed_files(worktree)
     record["lines_changed"] = gitops.changed_lines(worktree)
     dw_results = gate_result.get("results") or []
@@ -244,7 +305,21 @@ def run_candidates(cfg, caller, engine, task, order, worker_role, root,
     winner, ranked, reasoning = select_winner(candidates)
     integration_allowed, integration_reason = decide_integration(
         winner, ranked)
+    # structured candidate_failures (item 1): every disqualified
+    # candidate's cause, never a free-form concatenated string -- this is
+    # what an aggregate "all candidates disqualified" outcome is
+    # classified from (core.parallel_recovery.classify_aggregate), and
+    # what a persisted aggregate blocker carries as evidence.
+    candidate_failures = [
+        {"candidate_id": c["candidate_id"],
+         "failure_class": c.get("failure_class"), "code": c.get("code"),
+         "platform_owned": bool(c.get("platform_owned")),
+         "retryable": c.get("retryable", True),
+         "evidence_ref": c.get("evidence_ref"),
+         "detail": c.get("disqualify_reason")}
+        for c in candidates if c["disqualified"]]
     return {"winner": winner, "candidates": candidates,
+           "candidate_failures": candidate_failures,
            "signals": signals, "reasoning": reasoning,
            "integration_allowed": integration_allowed,
            "reason": integration_reason if winner is not None

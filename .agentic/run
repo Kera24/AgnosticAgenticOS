@@ -16,6 +16,13 @@ Multi-project registry (external application folders):
   python .agentic/run project add    --name "App" --root C:\path [--plan-file plan.md]
   python .agentic/run project create --name "App" --root C:\path
   python .agentic/run project init|start|show|doctor|pause|resume|stop <id>
+  python .agentic/run project recover <id>
+                                        reconcile any process-ownership
+                                        records left by a run whose owning
+                                        process was killed outright (see
+                                        `runs` below) -- also runs
+                                        automatically at the top of every
+                                        cycle
   python .agentic/run project archive|remove|open <id>
   python .agentic/run project relink <id> --root <new-path>
   python .agentic/run project adopt-legacy
@@ -61,6 +68,15 @@ provider-native caching which is always on and unconditional):
   python .agentic/run cache clear [--project <id>]
   python .agentic/run cache verify
 
+Process supervision (CLI backends -- Codex, Claude, Qwen, Orca; see
+core/supervisor.py for the timeout/heartbeat/termination design):
+  python .agentic/run runs processes [--project <id>]
+  python .agentic/run runs inspect <run-id> [--project <id>]
+  python .agentic/run runs terminate <run-id> [--project <id>]
+                                        verifies identity, shows the exact
+                                        target, terminates only that run's
+                                        owned process tree
+
 Memory (progressive disclosure):
   python .agentic/run memory status|compact|export
   python .agentic/run memory search "<query>"
@@ -98,6 +114,14 @@ Model Capability Registry + Hierarchical Orchestration (Phase 8/9):
 
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
+
+Forcing a single Phase-5 parallel candidate for one run (e.g. the native
+end-to-end acceptance fixture) -- never persisted to config.yaml/
+config.machine.yaml, in-memory for this process only:
+  python .agentic/run project-run --set parallelism.max_agents_global=1
+  (this is the existing `parallelism.max_agents_global` config
+  convention, applied via the existing generic --set override -- no
+  separate --parallelism/--max-candidates flag is needed or provided)
 """
 import argparse
 import json
@@ -517,6 +541,28 @@ def cmd_project(cfg, args):
             _print({"project": pid, "action": sub,
                     "scheduler": scheduler.state["state"],
                     "enabled": registry.get(pid)["enabled"]})
+            return 0
+        if sub == "recover":
+            # Standalone entry point for the full persisted-state recovery
+            # pipeline (core.recovery.run_recovery) -- the same stages
+            # run_cycle already runs automatically at the top of every
+            # cycle, plus stale-lease/aggregate-candidate-blocker/
+            # failure-streak/dependency/worktree reconciliation -- useful
+            # when a project is stuck (locked/lease_held/blocked on a
+            # since-fixed platform defect) and you want to confirm/force
+            # reconciliation without waiting for the next scheduled cycle.
+            from core.recovery import run_recovery
+            from core.scheduler import Scheduler
+            from core import logs as logs_mod
+            proj_cfg = projectops.project_cfg_for(cfg, registry, record)
+            agentic_dir = proj_cfg["runtime"]["project_dir"]
+            memdir = os.path.join(agentic_dir, "memory")
+            scheduler = Scheduler(proj_cfg, memdir)
+            log = lambda event: logs_mod.decision(
+                memdir, dict(event, source="project"))
+            stages = run_recovery(proj_cfg, agentic_dir, record["root_path"],
+                                  scheduler, None, log)
+            _print({"project": pid, "recovery": stages})
             return 0
         if sub == "archive":
             _print(registry.archive(pid))
@@ -986,6 +1032,56 @@ def cmd_cache(cfg, args):
     return 2
 
 
+def cmd_runs(cfg, args):
+    """runs processes [--project <id>] | inspect <run-id> [--project <id>] |
+    terminate <run-id> [--project <id>]
+
+    Operator visibility into CLI-backend process supervision
+    (core.supervisor) -- the same records `_run_cycle_locked`'s own
+    startup recovery reads automatically. `terminate` verifies process
+    identity (start-time token, never PID alone) before acting and
+    only ever touches the exact process tree it shows you first."""
+    from core import supervisor
+    cfg, memory = _apply_project_overlay(cfg, args)
+    agentic_dir = os.path.dirname(memory)
+    sub = args.plan or "processes"
+    extra = args.extra or []
+    if sub == "processes":
+        records = supervisor.list_records(agentic_dir)
+        _print({"processes": records})
+        return 0
+    if sub == "inspect":
+        if not extra:
+            print("usage: runs inspect <run-id>", file=sys.stderr)
+            return 2
+        run_id = extra[0]
+        matches = [r for r in supervisor.list_records(agentic_dir)
+                  if r.get("run_id") == run_id]
+        if not matches:
+            print("no process records for run %r" % run_id, file=sys.stderr)
+            return 1
+        _print({"run_id": run_id, "records": matches})
+        return 0
+    if sub == "terminate":
+        if not extra:
+            print("usage: runs terminate <run-id>", file=sys.stderr)
+            return 2
+        run_id = extra[0]
+        record = supervisor.find_running_record(agentic_dir, run_id)
+        if record is None:
+            print("no RUNNING process record for run %r (already finished, "
+                 "or never supervised)" % run_id, file=sys.stderr)
+            return 1
+        print("target: run_id=%s pid=%s backend=%s role=%s task_id=%s"
+             % (record.get("run_id"), record.get("pid"), record.get("backend"),
+                record.get("role"), record.get("task_id")))
+        outcome = supervisor.terminate_by_pid(record)
+        _print(outcome)
+        return 0 if outcome.get("terminated") else 1
+    print("unknown runs subcommand %r" % sub, file=sys.stderr)
+    return 2
+
+
 def cmd_memory(cfg, args):
     """memory status | search "<q>" | timeline <id> | show <id...> |
     forget <id> | compact | export [path]"""
@@ -1291,7 +1387,8 @@ COMMANDS = {
     "project-status": cmd_project_status, "project-pause": cmd_project_pause,
     "project-review": cmd_project_review, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
-    "context": cmd_context, "cache": cmd_cache, "memory": cmd_memory,
+    "context": cmd_context, "cache": cmd_cache, "runs": cmd_runs,
+    "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
     "project": cmd_project, "fleet": cmd_fleet, "mcp": cmd_mcp,
     "capability": cmd_capability, "plugin": cmd_plugin,

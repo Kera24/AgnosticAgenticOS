@@ -114,6 +114,22 @@ def match_pattern(path, pattern):
         return True
     if "/" not in pattern and fnmatch.fnmatch(os.path.basename(path), pattern):
         return True
+    # `fnmatch` has no notion of path segments -- "/**" already matches a
+    # DIRECT child (e.g. "src/**" matches "src/index.js") because "**"
+    # translates to a plain "match anything, including '/'" wildcard, but
+    # a trailing "/**/*" (conventionally meant to mean exactly the same
+    # thing: everything under this directory, any depth) requires a
+    # SECOND path separator to appear after the "**", so it silently
+    # rejects a direct child -- e.g. "src/**/*" would never match
+    # "src/index.js", only something two levels deep like "src/a/b.js"
+    # (item 3: "directory paths and descendant patterns must be handled
+    # correctly" -- the exact defect behind the canonical-contract-
+    # divergence live failure, where a conductor-authored allowed_paths
+    # entry used this literal "/**/*" shape). Collapsing the redundant
+    # trailing "/*" makes both spellings behave identically, matching
+    # this codebase's own conventional meaning of "**" everywhere else.
+    if pattern.endswith("/**/*") and fnmatch.fnmatch(path, pattern[:-2]):
+        return True
     return False
 
 

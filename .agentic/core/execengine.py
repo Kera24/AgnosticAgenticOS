@@ -32,7 +32,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import uuid
 
 from . import taskspace
@@ -204,11 +203,13 @@ class NativeExecutionEngine(ExecutionEngine):
 
 # -- orca ---------------------------------------------------------------------
 
-def _default_runner(argv, cwd=None, timeout=30):
-    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                          timeout=timeout)
-    return {"exit_code": proc.returncode, "stdout": proc.stdout or "",
-           "stderr": proc.stderr or ""}
+def _default_runner(argv, cwd=None, timeout=30, **kw):
+    # supervised, same as every other CLI backend runner (core.supervisor)
+    # -- never the bare subprocess.run(timeout=...) this used before,
+    # which cannot enforce its own deadline once the child spawns a
+    # descendant holding its stdout/stderr pipe handles open.
+    from . import supervisor
+    return supervisor.default_cli_runner(argv, cwd=cwd, timeout=timeout, **kw)
 
 
 _VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
@@ -300,8 +301,11 @@ class OrcaExecutionEngine(ExecutionEngine):
                "--workdir", request.worktree, "--role", request.role]
         try:
             raw = self.runner(argv, cwd=request.worktree,
-                              timeout=request.timeout_seconds or 900)
-        except subprocess.TimeoutExpired:
+                              timeout=request.timeout_seconds or 900,
+                              role=request.role, backend=self.name)
+        except Exception as exc:   # noqa: BLE001
+            raise EngineUnavailable("orca invocation failed: %s" % exc)
+        if raw.get("timed_out"):
             session = SessionResult(
                 session_id, self.name,
                 _legacy_dict(ok=False, backend="orca",
@@ -310,8 +314,6 @@ class OrcaExecutionEngine(ExecutionEngine):
                 STATUS_TIMEOUT, worktree=request.worktree)
             self._sessions[session_id] = session
             return session
-        except Exception as exc:   # noqa: BLE001
-            raise EngineUnavailable("orca invocation failed: %s" % exc)
         events = self._translate_events(raw)
         parsed = self._parse_result(raw)
         ok = raw["exit_code"] == 0 and not parsed.get("blocked")

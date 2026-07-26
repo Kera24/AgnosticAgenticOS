@@ -6,8 +6,49 @@ regression, but it is reported honestly; a NEW failure always fails the gate.
 import datetime as _dt
 import json
 import os
+import shlex
 
 from . import execpolicy
+
+# Common Unix utilities a task/architect-authored check might name,
+# never guaranteed present on a native Windows host (item 7 of the
+# canonical-contract-divergence fix): auto-detection (`detect_commands`
+# above) never generates these, but an admin/architect-authored
+# `verification.commands` entry might.
+_UNIX_ONLY_BASE_COMMANDS = ("ls", "cat", "grep", "test", "find", "touch")
+
+
+def _is_unix_only_command(command):
+    try:
+        tokens = shlex.split(str(command), posix=True)
+    except ValueError:
+        return False
+    return bool(tokens) and tokens[0] in _UNIX_ONLY_BASE_COMMANDS
+
+
+def _platform_neutral_existence_check(command, repo_root):
+    """Translates the common POSIX file/directory-existence idiom
+    (`test -f/-d PATH`, or `[ -f/-d PATH ]`) into a safe, internal Python
+    check -- no shell, no external tool, identical behaviour on every
+    platform (item 7: "structural checks must use the safe capability
+    layer, not shell syntax"). Returns (ok, detail), or `None` when
+    `command` isn't one of these two recognised idioms (never guessed)."""
+    try:
+        tokens = shlex.split(str(command), posix=True)
+    except ValueError:
+        return None
+    if len(tokens) == 3 and tokens[0] == "test" and tokens[1] in ("-f", "-d"):
+        flag, path = tokens[1], tokens[2]
+    elif len(tokens) == 4 and tokens[0] == "[" and tokens[-1] == "]" and \
+            tokens[1] in ("-f", "-d"):
+        flag, path = tokens[1], tokens[2]
+    else:
+        return None
+    full = os.path.join(repo_root, path)
+    exists = os.path.isfile(full) if flag == "-f" else os.path.isdir(full)
+    kind = "file" if flag == "-f" else "directory"
+    return exists, "%s %r %s" % (kind, path,
+                                "exists" if exists else "does not exist")
 
 # Deterministic-check classification (bootstrap fix): every check result is
 # tagged with exactly one of these kinds so callers can tell "a real test
@@ -114,21 +155,45 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
         record = {"name": name, "command": check["command"],
                   "mandatory": mandatory, "passed": False, "exit_code": None,
                   "detail": "", "kind": kind}
-        run = execpolicy.run_command(
-            check["command"], cwd=workdir, timeout=timeout,
-            shell_required=bool(check.get("shell_required", False)),
-            source="config")
-        record["exit_code"] = run["exit_code"]
-        record["passed"] = run["exit_code"] == 0 and not run["timed_out"]
-        output = run["stdout"] + run["stderr"]
-        record["detail"] = ("timed out after %ss" % timeout if run["timed_out"]
-                            else output[-400:].strip())
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-            with open(os.path.join(log_dir, name + ".log"), "w",
-                      encoding="utf-8", errors="replace") as fh:
-                fh.write("$ %s\nexit: %s\n\n%s" % (run["argv"],
-                                                   record["exit_code"], output))
+        # item 7: a recognised POSIX existence idiom never shells out --
+        # the safe capability layer's own primitive (a plain os.path
+        # check) is both correct and platform-neutral, on every OS.
+        neutral = _platform_neutral_existence_check(check["command"], workdir)
+        if neutral is not None:
+            record["passed"], record["detail"] = neutral
+            record["exit_code"] = 0 if record["passed"] else 1
+            record["platform_neutral"] = True
+        elif os.name == "nt" and _is_unix_only_command(check["command"]):
+            # an unrecognised Unix-only utility on native Windows: never
+            # silently execute it (it may not exist, or behave
+            # differently than intended) and never silently report it as
+            # passed either -- skipped, clearly labelled, still counts
+            # against a mandatory check exactly like any other failure.
+            record["passed"] = False
+            record["exit_code"] = None
+            record["detail"] = ("skipped: %r is a Unix-only command with "
+                                "no platform-neutral equivalent on this "
+                                "OS; replace it with an internal "
+                                "deterministic check" % check["command"])
+            record["platform_neutral"] = False
+            record["skipped_unix_only"] = True
+        else:
+            run = execpolicy.run_command(
+                check["command"], cwd=workdir, timeout=timeout,
+                shell_required=bool(check.get("shell_required", False)),
+                source="config")
+            record["exit_code"] = run["exit_code"]
+            record["passed"] = run["exit_code"] == 0 and not run["timed_out"]
+            output = run["stdout"] + run["stderr"]
+            record["detail"] = ("timed out after %ss" % timeout
+                                if run["timed_out"]
+                                else output[-400:].strip())
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+                with open(os.path.join(log_dir, name + ".log"), "w",
+                          encoding="utf-8", errors="replace") as fh:
+                    fh.write("$ %s\nexit: %s\n\n%s"
+                            % (run["argv"], record["exit_code"], output))
         results.append(record)
         if mandatory and not record["passed"]:
             ok = False

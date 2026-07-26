@@ -14,10 +14,49 @@ and nothing here lets a model run an arbitrary command -- only
 Every primitive takes an optional `log` callback and emits a structured
 audit event through it -- callers that don't care can omit it."""
 import os
+import re
 
 from . import errors, execpolicy, gitops
 
 _NOOP_LOG = lambda event: None   # noqa: E731
+
+# A model self-reporting `blocked` may not be trusted blindly (item 5 of
+# the canonical-contract-divergence fix): these primitives
+# (create_directory/create_file/inspect_git_read_only above) are plain
+# `os`-module operations, unconditionally available on every platform
+# Python itself runs on -- no environment probing, no external tool, no
+# feature negotiation is ever required to prove they exist. A claim that
+# one of them is "unavailable" is therefore ALWAYS contradicted by this
+# module's own existence, never a legitimate uncertainty.
+_CONTRADICTED_CAPABILITY_PATTERNS = (
+    ("create_directory", re.compile(
+        r"cannot create (a |the )?(\S+\s+){0,3}?director|"
+        r"director\w* creation (is |req\w*).{0,20}(unavailable|"
+        r"not available|not possible)|"
+        r"no (capability|primitive|way) to (create|make) (a )?director|"
+        r"director(y|ies) requires? mkdir", re.I)),
+    ("create_file", re.compile(
+        r"cannot create (a |the )?file|file creation (is |req\w*)"
+        r".{0,20}(unavailable|not available|not possible)", re.I)),
+    ("git_init", re.compile(
+        r"cannot (run |use )?git init|no (capability|way) to (run |use )?"
+        r"git init|require mkdir/git init", re.I)),
+    ("role_capability_fabrication", re.compile(
+        r"\bworker role cannot\b|role cannot edit paths outside", re.I)),
+)
+
+
+def contradicted_capability_claim(text):
+    """(capability_name) for the first ALWAYS-AVAILABLE platform
+    primitive this module provides that a free-form blocked/failure
+    claim falsely declares unavailable, or `None` when the claim matches
+    none of the known contradiction patterns (i.e. it may be a genuine
+    issue, never assumed false by omission)."""
+    text = text or ""
+    for name, pattern in _CONTRADICTED_CAPABILITY_PATTERNS:
+        if pattern.search(text):
+            return name
+    return None
 
 
 def _emit(log, event):

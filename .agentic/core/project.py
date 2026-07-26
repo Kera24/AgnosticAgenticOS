@@ -15,10 +15,13 @@ import re
 
 from . import backends, bootstrap_gate, capacity as capacity_mod
 from . import config as config_mod, contract as contract_mod
-from . import decision_policy, execengine, failures
+from . import contract_recovery
+from . import decision_policy, execengine, failures, fscap
 from . import inventory as inventory_mod
 from . import parallel as parallel_mod
+from . import parallel_recovery
 from . import preflight as preflight_mod
+from . import supervisor as supervisor_mod
 from . import errors, gate, gitops, logs, notify, projstate
 from .breaker import BreakerBoard
 from .orchestrator import (apply_edits, load_prompt, _schema, _snapshot)
@@ -145,6 +148,79 @@ def _context(cfg, memory, ledger=None, board=None, overrides=None,
     caller = caller or make_caller(cfg, ledger, board, overrides=overrides,
                                    log=log, memory_dir=memory, **kw)
     return ledger, board, scheduler, caller, log
+
+
+def _recover_stale_owned_processes(cfg, agentic_dir, root, scheduler, clock,
+                                   log):
+    """Reconcile process-ownership records left by a run whose OWNING
+    Python process was killed outright (not just its child) before its
+    own `finally: lease.release(); lock.release()` could run -- the one
+    scenario core.supervisor's own bounded-timeout guarantee can never
+    prevent by itself. Runs before this cycle even attempts its own
+    lock/lease acquisition, so a confirmed-dead prior run's stale state
+    never makes a fresh attempt wait out a lease TTL (observed live:
+    2026-07-25, ollama-pilot, after a Codex CLI hang killed the owning
+    process)."""
+    from . import taskspace as _ts
+
+    def _release_lease(record):
+        lease = _ts.ProjectLease(agentic_dir, cfg.get("project", {}).get("name"),
+                                 clock=clock)
+        holder = lease.holder()
+        if not holder:
+            return
+        # Ownership is verified by PID, not run_id: `run_cycle` can
+        # acquire the lease before `_run_cycle_locked` has generated
+        # its own run_id (a pre-existing gap -- the lease's own
+        # `run_id` field is often null), but the OS pid of the
+        # process that acquired it always matches this record's
+        # `parent_pid` (the process that spawned the supervised CLI
+        # call) when they're the same run. Never cleared on a PID
+        # match alone without the record's own identity already
+        # having been confirmed dead/reconciled by the caller.
+        if str(holder.get("pid")) == str(record.get("parent_pid")):
+            holder["status"] = "released"
+            lease._write(holder)   # noqa: SLF001 -- same file this class owns
+
+    def _release_lock(record):
+        lock_path = os.path.join(projstate.project_dir(agentic_dir),
+                                 "project.lock")
+        if not os.path.exists(lock_path):
+            return
+        try:
+            with open(lock_path, encoding="utf-8") as fh:
+                locked_pid = fh.read().strip()
+        except OSError:
+            return
+        if locked_pid and str(record.get("parent_pid")) == locked_pid:
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+
+    def _reconcile_task(record):
+        task_id = record.get("task_id")
+        if not task_id:
+            return
+        try:
+            projstate.update_task(agentic_dir, task_id, status="pending")
+        except errors.PolicyError:
+            pass
+        _ts.release_claim(agentic_dir, task_id)
+        if scheduler.state.get("state") == "running" and \
+                scheduler.state.get("current_cycle") == record.get("run_id"):
+            scheduler.state.update(state="idle", current_cycle=None,
+                                   next_run_at=None, cooling_reason=None,
+                                   deferred=None)
+            scheduler.save()
+
+    recovered = supervisor_mod.recover_stale_owned_processes(
+        agentic_dir, root=root, release_lease=_release_lease,
+        release_lock=_release_lock, reconcile_task=_reconcile_task, log=log)
+    if recovered:
+        log({"event": "supervisor_startup_recovery", "count": len(recovered),
+            "actions": [r["action"] for r in recovered]})
+    return recovered
 
 
 # -- project start -------------------------------------------------------------
@@ -311,6 +387,7 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
         return {"status": "no_project", "detail": "run project-start first"}
     ledger, board, scheduler, caller, log = _context(
         cfg, p["memory"], overrides=overrides, caller=caller, clock=clock, **kw)
+    _recover_stale_owned_processes(cfg, a, p["root"], scheduler, clock, log)
     cycle_minutes = ((cfg.get("scheduler") or {}).get("cycle") or {}).get(
         "maximum_duration_minutes",
         (cfg.get("cycle") or {}).get("maximum_duration_minutes"))
@@ -343,6 +420,7 @@ def run_cycle(cfg, caller=None, overrides=None, clock=None, run_id=None,
     finally:
         lease.release()
         lock.release()
+        supervisor_mod.clear_run_context()
 
 
 def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
@@ -392,6 +470,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                       overrides, run_id):
     a = p["agentic"]
     run_id = run_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    supervisor_mod.set_run_context(
+        a, run_id, project_id=cfg.get("project", {}).get("name"))
     started_at = _dt.datetime.now()
     run_dir = os.path.join(p["runs"], "cycle-" + run_id)
     os.makedirs(run_dir, exist_ok=True)
@@ -430,6 +510,29 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         if recovered_contract:
             log({"event": "expected_paths_contract_bug_recovered",
                  "run_id": run_id, "recovered": recovered_contract})
+    except Exception:   # noqa: BLE001 — recovery is best-effort
+        pass
+    try:   # self-heal tasks stuck on the legacy aggregate Phase-5
+           # "parallel candidates exhausted" blocker (code=None) once its
+           # constituent causes are conclusively platform-owned
+        recovered_aggregate = \
+            parallel_recovery.recover_parallel_candidate_aggregate(a)
+        if recovered_aggregate:
+            log({"event": "parallel_candidate_aggregate_recovered",
+                 "run_id": run_id,
+                 "recovered": [e for e in recovered_aggregate
+                              if e.get("recovered")]})
+    except Exception:   # noqa: BLE001 — recovery is best-effort
+        pass
+    try:   # self-heal tasks stuck on the legacy canonical-contract-
+           # divergence defect (backlog expected_paths narrower than what
+           # the work order actually required -- see core.contract_recovery)
+        recovered_contract_divergence = \
+            contract_recovery.recover_contract_divergence_blockers(
+                a, p["memory"], cfg)
+        if recovered_contract_divergence:
+            log({"event": "contract_divergence_recovered", "run_id": run_id,
+                 "recovered": recovered_contract_divergence})
     except Exception:   # noqa: BLE001 — recovery is best-effort
         pass
     try:   # auto-resolve reversible technical choices left over from a
@@ -499,7 +602,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
 
     def fail(outcome, detail, retry_after=None, block=False,
              blocking_reason=None, human_only=False, code=None,
-             failure_class=None):
+             failure_class=None, platform_owned=None, retryable=None,
+             evidence_ref=None, candidate_failures=None):
         from . import taskspace as _ts
         _ts.release_claim(a, task["id"])   # failed worktree stays as evidence
         projstate.update_task(
@@ -511,18 +615,41 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
             # the ONLY place a blocker is recorded for a task failure --
             # never duplicate this with a second add_blocker call at the
             # call site, or a legacy human_only=True/False duplicate pair
-            # (like the one this fixed) reappears.
-            projstate.add_blocker(a, task["id"], blocking_reason or detail,
-                                  human_only=human_only, code=code)
-            _remember(cfg, p["memory"], "failed_attempt",
-                      "task %s blocked" % task["id"],
-                      (blocking_reason or detail)[:400],
-                      task_id=task["id"], cycle_id=run_id,
-                      source="cycle", importance=0.8)
+            # (like the one this fixed) reappears. Every new blocker gets
+            # a full identity (item 8): platform_owned/retryable default
+            # from the stable failure taxonomy when the call site didn't
+            # already know them explicitly -- never left to infer later.
+            policy = failures.policy_for(failure_class) if failure_class \
+                else None
+            memory_id = _remember(cfg, p["memory"], "failed_attempt",
+                                  "task %s blocked" % task["id"],
+                                  (blocking_reason or detail)[:400],
+                                  task_id=task["id"], cycle_id=run_id,
+                                  source="cycle", importance=0.8)
+            projstate.add_blocker(
+                a, task["id"], blocking_reason or detail,
+                human_only=human_only, code=code,
+                failure_class=failure_class,
+                platform_owned=(failures.is_platform_class(failure_class)
+                                if platform_owned is None and failure_class
+                                else platform_owned),
+                retryable=(policy["retry_policy"] != failures.RETRY_NEVER_AUTOMATIC
+                          if retryable is None and policy else retryable),
+                evidence_ref=evidence_ref,
+                candidate_failures=candidate_failures,
+                memory_record_id=memory_id)
         if failure_class:
             log({"event": "failure_classified", "run_id": run_id,
                  "task_id": task["id"], "failure_class": failure_class,
                  "platform_class": failures.is_platform_class(failure_class)})
+        _persist_evidence(run_dir, "failure-classification.json",
+                          {"task_id": task["id"], "outcome": outcome,
+                           "failure_class": failure_class,
+                           "platform_class": failures.is_platform_class(
+                               failure_class) if failure_class else None,
+                           "blocked": block,
+                           "blocking_reason": blocking_reason or
+                           (detail[:200] if block else None)})
         return _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task,
                              backend, outcome, 0, started_at, detail,
                              retry_after, failure_class=failure_class)
@@ -543,7 +670,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         kind = (conducted.get("error") or {}).get("kind", "?")
         retry = (conducted.get("capacity") or {}).get("retry_after_seconds")
         return fail(kind if kind in ("rate_limit", "usage_limit")
-                    else "failure", "conductor failed: %s" % kind, retry)
+                    else "failure", "conductor failed: %s" % kind, retry,
+                    failure_class=failures.EXECUTION_TIMEOUT
+                    if kind == "timeout" else None)
     order = conducted["structured_output"]
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
@@ -579,6 +708,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     failure_class=failures.PROJECT_DEPENDENCY_MISSING)
     worktree = taskspace.create_task_worktree(p["root"], a, task["id"],
                                               PROJECT_BRANCH)
+    supervisor_mod.set_run_context(
+        a, run_id, project_id=cfg.get("project", {}).get("name"),
+        task_id=task["id"], worktree=worktree)
     # overwritten below only when Phase 5 parallel candidates ran and a
     # candidate OTHER than this primary worktree won -- the single-agent
     # path (the overwhelming majority of tasks) never touches this.
@@ -630,6 +762,34 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     # credential_required result never consumes model capacity.
     task_contract = contract_mod.build_task_contract(
         task, order, cfg.get("project", {}).get("name"), run_id=run_id)
+    # soft evidence only (never a dispatch gate -- see
+    # find_acceptance_criteria_gaps's own docstring): persisted alongside
+    # the contract for diagnosis, never consulted by preflight.
+    task_contract["acceptance_criteria_gaps"] = \
+        contract_mod.find_acceptance_criteria_gaps(task_contract)
+    # persist the ONE compiled contract every downstream component (gate,
+    # reviewer, recovery) can be pointed back to as evidence (item 4) --
+    # written BEFORE preflight so even a platform_invalid short-circuit
+    # leaves the compiled contract on disk for diagnosis.
+    with open(os.path.join(run_dir, "task-contract.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(task_contract, fh, indent=2, default=str)
+    new_contract_hash = contract_mod.contract_hash(task_contract)
+    if task.get("contract_hash") and \
+            task["contract_hash"] != new_contract_hash:
+        # the compiled contract changed since this task was last attempted
+        # (e.g. a canonical-contract-divergence migration) -- any
+        # prompt/context-cache entry keyed to THIS task's OLD contract
+        # must never be served again (item 6). Task-scoped dependency
+        # name: never invalidates another task's cache entries.
+        from . import cachestore as _cachestore
+        invalidated = _cachestore.CacheStore(p["memory"]).invalidate_dependents(
+            "task_contract_hash:%s" % task["id"], new_contract_hash,
+            reason="task %s contract changed" % task["id"])
+        if invalidated:
+            log({"event": "task_contract_cache_invalidated", "run_id": run_id,
+                 "task_id": task["id"], "invalidated_keys": invalidated})
+    projstate.update_task(a, task["id"], contract_hash=new_contract_hash)
     remaining_decisions = projstate.read_yaml(
         a, "decisions.yaml", {}).get("human_decisions_needed", [])
     preflight_result = preflight_mod.run_preflight(
@@ -732,6 +892,19 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     role=worker_role, coder_input=coder_input,
                     chain=chain_now))
                 result = session.to_legacy_dict()
+            # persisted evidence (item 4): backend response metadata and
+            # the redacted structured result, every attempt -- never lost
+            # again regardless of how this attempt ultimately resolves.
+            _persist_evidence(run_dir, "backend-metadata-%d.json"
+                              % coder_calls,
+                              {"backend": result.get("backend"),
+                               "model": result.get("model"),
+                               "usage": result.get("usage"),
+                               "finish_reason": result.get("finish_reason"),
+                               "capacity": result.get("capacity"),
+                               "error": result.get("error")})
+            _persist_evidence(run_dir, "coder-result-%d.json" % coder_calls,
+                              result)
             if not result["ok"]:
                 kind = (result.get("error") or {}).get("kind", "?")
                 retry = (result.get("capacity") or {}).get("retry_after_seconds")
@@ -749,18 +922,63 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                              "from": result.get("backend"), "to": remaining[0]})
                         continue
                 return fail(kind if kind in ("rate_limit", "usage_limit")
-                            else "failure", "coder failed: %s" % kind, retry)
+                            else "failure", "coder failed: %s" % kind, retry,
+                            failure_class=failures.EXECUTION_TIMEOUT
+                            if kind == "timeout" else None)
             used_backend = result.get("backend", used_backend)
             usage = result.get("usage") or {}
             total_tokens += (usage.get("input_tokens") or 0) + \
                             (usage.get("output_tokens") or 0)
             if result.get("blocked"):
-                return fail("failure", result.get("blocker") or "coder blocked",
-                            block=True, blocking_reason=result.get("blocker"))
+                # never trust a model-declared blocker blindly (item 5):
+                # a claim that a platform-provided primitive (mkdir, file
+                # write, git init, ...) is unavailable is ALWAYS
+                # contradicted -- `fscap`'s capability layer needs no
+                # environment probing to prove those exist. One
+                # corrective repair round is permitted before this
+                # actually blocks the task, and the contradicted claim's
+                # own free text is never copied verbatim into
+                # blocking_reason.
+                claim = result.get("blocker") or "coder blocked"
+                contradicted = fscap.contradicted_capability_claim(claim)
+                if contradicted and det_attempts < max_det_attempts:
+                    det_attempts += 1
+                    log({"event": "contradicted_capability_claim",
+                         "run_id": run_id, "task_id": task["id"],
+                         "capability": contradicted, "claim": claim[:300]})
+                    feedback = {
+                        "failing_checks": [],
+                        "capability_contradiction": {
+                            "capability": contradicted,
+                            "detail": ("the platform's capability layer "
+                                      "(core.fscap) proves %s is always "
+                                      "available; do not repeat this "
+                                      "claim, use the provided edit/mkdir "
+                                      "actions instead" % contradicted)},
+                        "instruction": "your prior claim is contradicted "
+                                      "by the platform's own capability "
+                                      "layer -- retry using the edit "
+                                      "actions already available to you"}
+                    continue
+                if contradicted:
+                    _revert_worktree(worktree)
+                    return fail(
+                        "failure",
+                        "coder repeated a contradicted capability claim "
+                        "(%s)" % contradicted, block=True,
+                        blocking_reason=(
+                            "contradicted capability claim: %s -- the "
+                            "platform capability layer proves this is "
+                            "available" % contradicted)[:200],
+                        code=projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+                        failure_class=failures.MODEL_OUTPUT_INVALID)
+                return fail("failure", claim, block=True,
+                            blocking_reason=claim)
 
             violations = _apply_and_check_paths(cfg, result, order, worktree,
                                                 protected, authorised_exceptions,
-                                                log=log)
+                                                log=log, run_dir=run_dir,
+                                                attempt=coder_calls)
             if violations:
                 det_attempts += 1
                 log({"event": "scope_violation", "run_id": run_id,
@@ -811,6 +1029,8 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                         blocking_reason=bootstrap_gate.NO_CHECKS_HUMAN_REASON,
                         code=bootstrap_gate.DETERMINISTIC_CHECKS_MISSING_CODE,
                         failure_class=failures.PLATFORM_CAPABILITY_MISSING)
+            _persist_evidence(run_dir, "validation-result-%d.json"
+                              % coder_calls, gate_result)
             if not gate_result["ok"]:
                 failing = [r for r in gate_result["results"]
                            if r["mandatory"] and not r["passed"]]
@@ -889,12 +1109,30 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
             authorised_exceptions, worktree, log, load_prompt, _schema,
             _review_input, _apply_and_check_paths)
         if outcome["winner"] is None:
-            return fail("failure",
-                        "all parallel candidates failed: %s"
-                        % outcome["reasoning"], block=True,
-                        blocking_reason=(
-                            "parallel candidates exhausted: %s"
-                            % outcome["reasoning"])[:200])
+            # item 1/2: classify the aggregate from its STRUCTURED
+            # constituent candidate_failures (never by re-parsing
+            # `outcome["reasoning"]") -- a platform-only aggregate still
+            # blocks (see core.failures' block_with_platform_blocker
+            # policy) but is always recoverable (core.parallel_recovery /
+            # core.recovery), and a pure provider-capacity aggregate is
+            # deferred rather than hard-blocked.
+            verdict = parallel_recovery.classify_aggregate(
+                outcome.get("candidate_failures") or [])
+            return fail(
+                "failure",
+                "all parallel candidates failed: %s" % outcome["reasoning"],
+                block=verdict["block"],
+                blocking_reason=(
+                    "parallel candidates exhausted: %s"
+                    % outcome["reasoning"])[:200] if verdict["block"]
+                else None,
+                human_only=verdict["human_only"],
+                code=(projstate.BLOCKER_CODE_PARALLEL_CANDIDATES_EXHAUSTED
+                     if verdict["block"] else None),
+                failure_class=verdict["failure_class"],
+                platform_owned=verdict["platform_owned"],
+                retryable=verdict["retryable"],
+                candidate_failures=outcome.get("candidate_failures"))
         # A tied/ambiguous ranking still yields a (deterministically
         # tie-broken) winner that goes on to security review and checks
         # exactly like any other candidate -- ambiguity only ever holds
@@ -1151,8 +1389,21 @@ def _invoke_coder(cfg, caller, coder_input, worktree, chain, role="coder"):
     return result
 
 
+def _persist_evidence(run_dir, name, data):
+    """Best-effort structured evidence persistence (item 4) -- redacted
+    before it ever touches disk, exactly like every other audit trail
+    entry. Never raises: capturing evidence must never break a cycle."""
+    try:
+        text = redact(json.dumps(data, indent=2, default=str))
+        with open(os.path.join(run_dir, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except Exception:   # noqa: BLE001
+        pass
+
+
 def _apply_and_check_paths(cfg, result, order, worktree, protected,
-                           authorised_exceptions=None, log=None):
+                           authorised_exceptions=None, log=None,
+                           run_dir=None, attempt=None):
     if result.get("edits") is not None:
         violations = apply_edits(worktree, result["edits"],
                                  order["allowed_paths"],
@@ -1178,7 +1429,13 @@ def _apply_and_check_paths(cfg, result, order, worktree, protected,
                 int(cfg.get("execution", {}).get("max_changed_lines", 400)))
     if lines > limit:
         violations.append("changed lines %d exceed limit %d" % (lines, limit))
-    return sorted(set(violations))
+    violations = sorted(set(violations))
+    if run_dir:
+        _persist_evidence(
+            run_dir, "applied-edits-%s.json" % (attempt or "0"),
+            {"edits": result.get("edits"), "violations": violations,
+             "changed_files": files, "changed_lines": lines})
+    return violations
 
 
 def _revert_worktree(worktree):

@@ -218,7 +218,8 @@ class CodexCLIBackend(CLIBackendBase):
                timeout):
         argv = self.build_argv(role, permissions, workspace)
         run = self.runner(argv, cwd=workspace, timeout=timeout,
-                          stdin_text=compose_prompt(prompt, input_data))
+                          stdin_text=compose_prompt(prompt, input_data),
+                          role=role, backend=self.name)
         output = run["stdout"] + "\n" + run["stderr"]
         if run["timed_out"] or run["exit_code"] != 0:
             classify_cli_failure(self.name, run["exit_code"], output,

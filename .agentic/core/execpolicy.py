@@ -10,11 +10,21 @@ Rules enforced here (not in prompts):
 - Every execution records the exact argv, exit code, and duration.
 """
 import os
+import re
 import shlex
 import subprocess
 import time
 
 from . import errors
+
+# Never a permitted command on Windows regardless of configuration (item
+# 7 of the canonical-contract-divergence fix): `rm -rf`/`-fr` is a
+# Unix-shell recursive-delete idiom an architect/admin might carry over
+# from Linux-centric examples -- inert here even if it somehow ends up
+# in an allowlist, on every OS this platform runs `run_allowlisted` on
+# when that OS is Windows.
+_RM_RF_RE = re.compile(r"^\s*rm\s+(-\S*\s+)*-[a-z]*[rf][a-z]*[rf][a-z]*\b",
+                      re.I)
 
 
 def parse_command(cmd):
@@ -80,6 +90,8 @@ def run_command(cmd, cwd, timeout, env=None, shell_required=False,
 def run_allowlisted(cmd, allowlist, cwd, timeout, env=None):
     """Run a model-requested command: must appear verbatim in the allowlist;
     executed without a shell. Returns None (skipped) if not allowlisted."""
+    if os.name == "nt" and _RM_RF_RE.search(str(cmd)):
+        return None   # never a permitted command on Windows -- see module docstring
     if cmd not in (allowlist or []):
         return None
     return run_command(cmd, cwd, timeout, env=env, shell_required=False,

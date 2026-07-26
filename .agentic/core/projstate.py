@@ -28,6 +28,11 @@ TASK_DEFAULTS = {
     # task that introduces the test framework), or unset for ordinary
     # feature/business-logic work -- see core.bootstrap_gate.
     "kind": None,
+    # Hash of the compiled task contract (core.contract.contract_hash) as
+    # of the last cycle that attempted this task -- used to detect a
+    # canonical-contract-divergence migration so stale prompt/context
+    # cache entries can be invalidated (see project.py's preflight step).
+    "contract_hash": None,
 }
 
 FILES = ["PROJECT.md", "architecture.md", "acceptance-criteria.yaml",
@@ -217,28 +222,49 @@ BLOCKER_CODE_POLICY_DENIED = "policy_denied"
 BLOCKER_CODE_DEPENDENCY_MISSING = "dependency_missing"
 BLOCKER_CODE_AUTHENTICATION_REQUIRED = "authentication_required"
 BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH = "structural_contract_mismatch"
+BLOCKER_CODE_PARALLEL_CANDIDATES_EXHAUSTED = "parallel_candidates_exhausted"
 BLOCKER_CODES = (BLOCKER_CODE_DETERMINISTIC_CHECKS_MISSING,
                  BLOCKER_CODE_GENUINE_HUMAN_DECISION,
                  BLOCKER_CODE_POLICY_DENIED,
                  BLOCKER_CODE_DEPENDENCY_MISSING,
                  BLOCKER_CODE_AUTHENTICATION_REQUIRED,
-                 BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH)
+                 BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+                 BLOCKER_CODE_PARALLEL_CANDIDATES_EXHAUSTED)
 
 
-def add_blocker(agentic_dir, task_id, reason, human_only=False, code=None):
+def add_blocker(agentic_dir, task_id, reason, human_only=False, code=None,
+                failure_class=None, platform_owned=None, retryable=None,
+                evidence_ref=None, candidate_failures=None,
+                memory_record_id=None):
     """Append a blocker unless an unresolved one already exists for the
     same (task_id, code) -- a stable code, never free-form reason text,
-    is what prevents duplicate human/non-human records for one failure."""
+    is what prevents duplicate human/non-human records for one failure.
+    `failure_class`/`platform_owned`/`retryable`/`evidence_ref` give every
+    new blocker a stable identity beyond the reason string (never another
+    code=None record); `candidate_failures`, when given, is the structured
+    per-candidate cause list behind a Phase-5 aggregate blocker -- never a
+    concatenated free-text reason (see core.parallel_recovery).
+    `memory_record_id`, when given, links the `failed_attempt` memory
+    record written for this same failure -- recovery uses it to mark that
+    record superseded once resolved, so a repaired platform defect is
+    never re-presented as a live constraint (item 6)."""
     blockers = read_yaml(agentic_dir, "blockers.yaml", {"blockers": []})
     if code is not None and any(
             not b.get("resolved") and b.get("task") == task_id and
             b.get("code") == code for b in blockers["blockers"]):
         return
-    blockers["blockers"].append({
+    entry = {
         "task": task_id, "reason": reason, "code": code,
         "human_only": bool(human_only),
         "created_at": _dt.datetime.now().isoformat(timespec="seconds"),
-        "resolved": False})
+        "resolved": False, "resolved_at": None,
+        "failure_class": failure_class, "platform_owned": platform_owned,
+        "retryable": retryable, "evidence_ref": evidence_ref,
+        "memory_record_id": memory_record_id,
+    }
+    if candidate_failures is not None:
+        entry["candidate_failures"] = candidate_failures
+    blockers["blockers"].append(entry)
     write_yaml(agentic_dir, "blockers.yaml", blockers)
 
 
