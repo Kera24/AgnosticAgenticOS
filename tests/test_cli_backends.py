@@ -54,7 +54,8 @@ def test_codex_auth_status_parsing():
 
 # 6. Codex non-interactive command construction ---------------------------------------
 def test_codex_command_construction():
-    backend = CodexCLIBackend("codex", {}, runner=FakeRunner([]),
+    backend = CodexCLIBackend(
+        "codex", {"ignore_user_config": True}, runner=FakeRunner([]),
                               which=lambda b: "x")
     argv = backend.build_argv("coder", "write", "C:/ws")
     # global approval option MUST come before the `exec` subcommand:
@@ -73,6 +74,28 @@ def test_codex_command_construction():
     # write permission alone is not enough — role must be the coder
     argv = backend.build_argv("qa", "write", "C:/ws")
     assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+def test_codex_native_windows_loads_sandbox_config_by_default(monkeypatch):
+    """Native Windows must load [windows].sandbox from config.toml; otherwise
+    an explicit workspace-write invocation can degrade to read-only."""
+    import providers.cli_codex as cli_codex
+    monkeypatch.setattr(cli_codex.os, "name", "nt")
+    backend = CodexCLIBackend("codex", {}, runner=FakeRunner([]),
+                              which=lambda b: "C:/bin/codex.exe")
+    argv = backend.build_argv("coder", "write", "C:/ws")
+    assert "--ignore-user-config" not in argv
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+
+
+def test_codex_ignore_user_config_explicit_overrides_platform(monkeypatch):
+    import providers.cli_codex as cli_codex
+    monkeypatch.setattr(cli_codex.os, "name", "nt")
+    backend = CodexCLIBackend(
+        "codex", {"ignore_user_config": True}, runner=FakeRunner([]),
+        which=lambda b: "C:/bin/codex.exe")
+    assert "--ignore-user-config" in backend.build_argv(
+        "coder", "write", "C:/ws")
 
 
 def test_codex_command_construction_rejects_subcommand_placement_by_default():
@@ -262,8 +285,10 @@ CONFIRMED_SMOKE_JSONL = "\n".join([
 
 def _codex_backend(runner_responses, cfg=None):
     from providers.cli_codex import CodexCLIBackend as _Codex
-    return _Codex("codex", cfg or {}, runner=FakeRunner(runner_responses),
-                  which=lambda b: "x")
+    effective_cfg = {"ignore_user_config": True}
+    effective_cfg.update(cfg or {})
+    return _Codex("codex", effective_cfg,
+                  runner=FakeRunner(runner_responses), which=lambda b: "x")
 
 
 def test_codex_smoke_argv_matches_confirmed_working_invocation():
