@@ -86,9 +86,16 @@ def run_ui(cfg, port=None, open_browser=None, dev_origin=False,
     config = uvicorn.Config(app, host="127.0.0.1", port=port,
                             log_level="warning", access_log=False)
     server = uvicorn.Server(config)
+    worker = None
+    if os.environ.get("AGENTIC_SERVICE_MODE") == "1":
+        from core.fleet_worker import start_worker
+        worker = start_worker(cfg)
     try:
         server.run()
     except KeyboardInterrupt:
         pass
+    finally:
+        if worker is not None:
+            worker.stop()
     print("dashboard stopped.")
     return 0
