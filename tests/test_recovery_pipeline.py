@@ -70,6 +70,59 @@ def test_recovery_pipeline_is_idempotent(sandbox):
     assert tasks["t1-init-repo"]["status"] == "pending"
 
 
+def test_recovery_clears_fixed_windows_codex_readonly_blocker(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    sandbox["cfg"].setdefault("backends", {})["codex"] = {
+        "type": "cli", "kind": "codex",
+        "binary": "C:/complete/codex.exe",
+        "ignore_user_config": False,
+    }
+    monkeypatch.setattr(recovery, "_is_native_windows", lambda: True)
+    task = simple_task("t1-init-repo", kind="bootstrap")
+    seed_project(sandbox, [task])
+    a = str(sandbox["agentic"])
+    reason = ("Workspace is read-only, so the required scaffold files and "
+              "directories cannot be created.")
+    projstate.update_task(a, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(a, task["id"], reason, code=None,
+                          human_only=False)
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], a, str(sandbox["repo"]), _scheduler(sandbox),
+        Clock(), log=lambda e: None)
+
+    tasks = {t["id"]: t for t in projstate.load_backlog(a)}
+    assert tasks[task["id"]]["status"] == "pending"
+    assert tasks[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(a) == []
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    assert any(e["task_id"] == task["id"] for e in events)
+
+
+def test_windows_codex_readonly_signature_overrides_stale_false_classification(
+        sandbox):
+    project_cfg(sandbox)
+    seed_project(sandbox, [simple_task()])
+    a = str(sandbox["agentic"])
+    memdir = str(sandbox["agentic"] / "memory")
+    reason = ("Workspace is read-only, so the required scaffold files and "
+              "directories cannot be created.")
+    _write_cycle(memdir, "r1", "success", "ok")
+    _write_cycle(memdir, "r2", "failure", reason,
+                 failure_class="workspace_policy_denied", platform=False)
+    scheduler = _scheduler(sandbox)
+    scheduler.state["failure_streak"] = 1
+    scheduler.save()
+
+    report = recovery.reconstruct_failure_streak(a, scheduler)
+
+    assert report["resulting_streak"] == 0
+    assert [r["run_id"] for r in report["removed_platform_failures"]] == [
+        "r2"]
+
+
 # -- item 6: failure-streak reconciliation --------------------------------------
 
 def _write_cycle(memdir, run_id, outcome, detail, failure_class=None,
