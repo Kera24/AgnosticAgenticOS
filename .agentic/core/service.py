@@ -111,9 +111,11 @@ def default_spawner(port, home):
     if os.name == "nt":
         flags = subprocess.DETACHED_PROCESS | \
             subprocess.CREATE_NEW_PROCESS_GROUP
+    child_env = os.environ.copy()
+    child_env["AGENTIC_SERVICE_MODE"] = "1"
     proc = subprocess.Popen(argv, stdout=log, stderr=log,
                             cwd=str(config_mod.AGENTIC_DIR.parent),
-                            creationflags=flags)
+                            creationflags=flags, env=child_env)
     return proc.pid
 
 
