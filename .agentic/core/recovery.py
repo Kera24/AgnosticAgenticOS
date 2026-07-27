@@ -53,6 +53,10 @@ _WINDOWS_CODEX_READ_ONLY_RE = re.compile(
     r"directories cannot be created\.?$", re.I)
 
 
+def _is_native_windows():
+    return os.name == "nt"
+
+
 def _is_windows_codex_readonly_detail(detail):
     """Match only the exact persisted live failure produced by the broken
     native-Windows Codex sandbox. This is deliberately narrower than a bare
@@ -71,7 +75,8 @@ def recover_windows_codex_readonly_blocker(agentic_dir, cfg):
     as a resolved platform-owned workspace-policy failure.
     """
     codex = ((cfg or {}).get("backends") or {}).get("codex") or {}
-    if os.name != "nt" or codex.get("ignore_user_config") is not False:
+    if not _is_native_windows() or \
+            codex.get("ignore_user_config") is not False:
         return []
     if not projstate.exists(agentic_dir):
         return []
