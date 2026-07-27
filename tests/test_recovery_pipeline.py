@@ -123,6 +123,56 @@ def test_windows_codex_readonly_signature_overrides_stale_false_classification(
         "r2"]
 
 
+def test_recovery_uses_gate_artifact_for_fixed_windows_npm_resolution(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task = simple_task("t1-init-repo", kind="bootstrap")
+    seed_project(sandbox, [task])
+    a = str(sandbox["agentic"])
+    reason = "deterministic checks failing after 3 attempts"
+    projstate.update_task(a, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(a, task["id"], reason, code=None,
+                          human_only=False)
+
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r2"
+    run_dir.mkdir(parents=True)
+    (run_dir / "work-order.json").write_text(
+        json.dumps({"item": task["id"]}), encoding="utf-8")
+    (run_dir / "validation-result-3.json").write_text(json.dumps({
+        "ok": False,
+        "results": [{
+            "name": "npm-test",
+            "command": "npm run test --silent",
+            "exit_code": 127,
+            "detail": "command not found: npm",
+        }],
+    }), encoding="utf-8")
+
+    memdir = str(sandbox["agentic"] / "memory")
+    _write_cycle(memdir, "r1", "success", "ok")
+    _write_cycle(memdir, "r2", "failure", reason,
+                 failure_class="deterministic_check_failed", platform=False)
+    scheduler = _scheduler(sandbox)
+    scheduler.state["failure_streak"] = 1
+    scheduler.save()
+    monkeypatch.setattr(recovery, "_is_native_windows", lambda: True)
+    monkeypatch.setattr(
+        recovery, "_windows_command_available", lambda command: command == "npm")
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], a, str(sandbox["repo"]), scheduler, Clock(),
+        log=lambda e: None)
+
+    tasks = {t["id"]: t for t in projstate.load_backlog(a)}
+    assert tasks[task["id"]]["status"] == "pending"
+    assert projstate.open_blockers(a) == []
+    assert stages["failure_streak_reconciliation"]["resulting_streak"] == 0
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    assert any(e["action"] ==
+               "reset_windows_command_resolution_blocker" for e in events)
+
+
 # -- item 6: failure-streak reconciliation --------------------------------------
 
 def _write_cycle(memdir, run_id, outcome, detail, failure_class=None,
