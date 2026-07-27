@@ -8,12 +8,14 @@ blocker had no path back to health short of hand-editing state files.
 now runs; every stage returns a structured result, even when it finds
 nothing to do, so a caller can always see exactly what was (or wasn't)
 recovered."""
+import glob
 import json
 import os
 import re
+import shutil
 
 from . import bootstrap_gate, contract_recovery, parallel_recovery
-from . import projstate, taskspace
+from . import logs, projstate, taskspace
 
 
 def _stage(name, events, extra=None):
@@ -111,6 +113,107 @@ def recover_windows_codex_readonly_blocker(agentic_dir, cfg):
             "task_id": task["id"],
             "action": "reset_windows_codex_readonly_blocker",
             "resolved_blockers": resolved,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+# -- fixed Windows command-shim resolution blocker ---------------------------
+
+_DETERMINISTIC_REPAIR_EXHAUSTED = "deterministic checks failing after 3 attempts"
+
+
+def _windows_command_available(command):
+    return bool(shutil.which(command))
+
+
+def _command_resolution_evidence(agentic_dir, task_id):
+    """Find the newest persisted gate result proving a bare npm lookup failed.
+
+    The generic task blocker does not retain individual gate details, so
+    recovery consults immutable cycle artifacts. It never relies on model
+    prose and never clears a normal failing-test result.
+    """
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        order_path = os.path.join(cycle_dir, "work-order.json")
+        try:
+            with open(order_path, encoding="utf-8") as fh:
+                order = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if order.get("item") != task_id:
+            continue
+        for path in sorted(glob.glob(
+                os.path.join(cycle_dir, "validation-result-*.json")),
+                reverse=True):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    result = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            for check in result.get("results") or []:
+                command = str(check.get("command") or "")
+                detail = str(check.get("detail") or "")
+                if check.get("exit_code") == 127 and \
+                        command.lower().startswith("npm ") and \
+                        "command not found: npm" in detail.lower():
+                    return {
+                        "run_id": os.path.basename(cycle_dir).replace(
+                            "cycle-", "", 1),
+                        "evidence_ref": path,
+                        "command": command,
+                    }
+        return None
+    return None
+
+
+def recover_windows_command_resolution_blocker(agentic_dir, cfg):
+    """Retry a generic gate-exhaustion blocker only when persisted evidence
+    proves the now-fixed Windows npm/PATHEXT resolution defect."""
+    if not _is_native_windows() or not _windows_command_available("npm"):
+        return []
+    if not projstate.exists(agentic_dir):
+        return []
+
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []})
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or \
+                task.get("blocking_reason") != _DETERMINISTIC_REPAIR_EXHAUSTED:
+            continue
+        evidence = _command_resolution_evidence(agentic_dir, task["id"])
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if blocker.get("reason") != _DETERMINISTIC_REPAIR_EXHAUSTED:
+                continue
+            blocker.update({
+                "resolved": True,
+                "code": projstate.BLOCKER_CODE_POLICY_DENIED,
+                "failure_class": "platform_capability_missing",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_windows_command_resolution_blocker",
+            "resolved_blockers": resolved,
+            **evidence,
         })
     if events:
         projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
@@ -275,16 +378,29 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
 
     windows_codex_events = recover_windows_codex_readonly_blocker(
         agentic_dir, cfg)
+    windows_command_events = recover_windows_command_resolution_blocker(
+        agentic_dir, cfg)
     migrated = list(bootstrap_gate.recover_bootstrap_deadlock(agentic_dir))
     migrated += list(bootstrap_gate.recover_expected_paths_contract_bug(
         agentic_dir))
     migrated += windows_codex_events
+    migrated += windows_command_events
     stages["blocker_code_migration"] = _stage("blocker_code_migration",
                                               migrated)
 
     aggregate_events = parallel_recovery.recover_parallel_candidate_aggregate(
         agentic_dir)
     memory_dir = os.path.join(str(agentic_dir), "memory")
+    for event in windows_command_events:
+        logs.decision(memory_dir, {
+            "event": "failure_classified",
+            "run_id": event["run_id"],
+            "task_id": event["task_id"],
+            "failure_class": "platform_capability_missing",
+            "platform_class": True,
+            "corrected_by": "windows_command_resolution_recovery",
+            "evidence_ref": event["evidence_ref"],
+        })
     contract_events = contract_recovery.recover_contract_divergence_blockers(
         agentic_dir, memory_dir, cfg)
     stages["aggregate_candidate_cause_reconstruction"] = _stage(
@@ -292,7 +408,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     stages["fixed_platform_defect_recovery"] = _stage(
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
-        contract_events + windows_codex_events)
+        contract_events + windows_codex_events + windows_command_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
