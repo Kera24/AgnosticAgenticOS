@@ -129,7 +129,7 @@ def test_recovery_uses_gate_artifact_for_fixed_windows_npm_resolution(
     task = simple_task("t1-init-repo", kind="bootstrap")
     seed_project(sandbox, [task])
     a = str(sandbox["agentic"])
-    reason = "deterministic checks failing after 3 attempts"
+    reason = "repair attempts exhausted"
     projstate.update_task(a, task["id"], status="blocked",
                           blocking_reason=reason, last_result="failure")
     projstate.add_blocker(a, task["id"], reason, code=None,
