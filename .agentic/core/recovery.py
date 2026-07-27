@@ -121,7 +121,10 @@ def recover_windows_codex_readonly_blocker(agentic_dir, cfg):
 
 # -- fixed Windows command-shim resolution blocker ---------------------------
 
-_DETERMINISTIC_REPAIR_EXHAUSTED = "deterministic checks failing after 3 attempts"
+_DETERMINISTIC_REPAIR_EXHAUSTED_REASONS = {
+    "deterministic checks failing after 3 attempts",
+    "repair attempts exhausted",
+}
 
 
 def _windows_command_available(command):
@@ -186,7 +189,7 @@ def recover_windows_command_resolution_blocker(agentic_dir, cfg):
     events = []
     for task in projstate.load_backlog(agentic_dir):
         if task.get("status") != "blocked" or \
-                task.get("blocking_reason") != _DETERMINISTIC_REPAIR_EXHAUSTED:
+                task.get("blocking_reason") not in _DETERMINISTIC_REPAIR_EXHAUSTED_REASONS:
             continue
         evidence = _command_resolution_evidence(agentic_dir, task["id"])
         if not evidence:
@@ -195,7 +198,7 @@ def recover_windows_command_resolution_blocker(agentic_dir, cfg):
         for blocker in blockers:
             if blocker.get("resolved") or blocker.get("task") != task["id"]:
                 continue
-            if blocker.get("reason") != _DETERMINISTIC_REPAIR_EXHAUSTED:
+            if blocker.get("reason") not in _DETERMINISTIC_REPAIR_EXHAUSTED_REASONS:
                 continue
             blocker.update({
                 "resolved": True,
