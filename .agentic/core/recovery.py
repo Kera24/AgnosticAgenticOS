@@ -50,7 +50,7 @@ def _stale_lease_recovery(agentic_dir, cfg, clock):
 
 _WINDOWS_CODEX_READ_ONLY_RE = re.compile(
     r"^Workspace is read-only, so the required scaffold files and "
-    r"directories cannot be created\\.?$", re.I)
+    r"directories cannot be created\.?$", re.I)
 
 
 def _is_windows_codex_readonly_detail(detail):
