@@ -18,6 +18,11 @@ import time
 
 from . import errors
 
+# Capture the real resolver once. Other modules legitimately monkeypatch the
+# shared shutil module in isolated tests; those patches must not redirect
+# unrelated verification commands.
+_DEFAULT_WHICH = shutil.which
+
 # Never a permitted command on Windows regardless of configuration (item
 # 7 of the canonical-contract-divergence fix): `rm -rf`/`-fr` is a
 # Unix-shell recursive-delete idiom an architect/admin might carry over
@@ -56,7 +61,7 @@ def resolve_argv_executable(argv, env=None, platform=None, which=None):
     command = resolved[0]
     if os.path.dirname(command):
         return resolved
-    which = which or shutil.which
+    which = which or _DEFAULT_WHICH
     search_path = (env or os.environ).get("PATH")
     found = which(command, path=search_path)
     if found:
@@ -79,9 +84,9 @@ def run_command(cmd, cwd, timeout, env=None, shell_required=False,
         popen_cmd, use_shell = cmd, True
         argv_logged = ["<shell>", cmd]
     else:
-        popen_cmd = resolve_argv_executable(parse_command(cmd), env=run_env)
+        argv_logged = parse_command(cmd)
+        popen_cmd = resolve_argv_executable(argv_logged, env=run_env)
         use_shell = False
-        argv_logged = popen_cmd
 
     started = time.time()
     result = {"argv": argv_logged, "cwd": str(cwd), "source": source,
