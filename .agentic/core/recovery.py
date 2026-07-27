@@ -10,6 +10,7 @@ nothing to do, so a caller can always see exactly what was (or wasn't)
 recovered."""
 import json
 import os
+import re
 
 from . import bootstrap_gate, contract_recovery, parallel_recovery
 from . import projstate, taskspace
@@ -43,6 +44,72 @@ def _stale_lease_recovery(agentic_dir, cfg, clock):
     lease._write(raw)   # noqa: SLF001 -- same file this class owns
     return _stage("stale_lease_recovery",
                   [{"action": "released_expired_lease"}])
+
+
+# -- fixed native-Windows Codex sandbox blocker -------------------------------
+
+_WINDOWS_CODEX_READ_ONLY_RE = re.compile(
+    r"^Workspace is read-only, so the required scaffold files and "
+    r"directories cannot be created\\.?$", re.I)
+
+
+def _is_windows_codex_readonly_detail(detail):
+    """Match only the exact persisted live failure produced by the broken
+    native-Windows Codex sandbox. This is deliberately narrower than a bare
+    read-only substring so a genuine repository policy denial is never
+    silently cleared."""
+    return bool(_WINDOWS_CODEX_READ_ONLY_RE.match((detail or "").strip()))
+
+
+def recover_windows_codex_readonly_blocker(agentic_dir, cfg):
+    """Clear the stale blocker once the Windows Codex sandbox fix is active.
+
+    Recovery is permitted only on native Windows and only when the machine
+    explicitly loads Codex user config (ignore_user_config: false), which is
+    where the elevated Windows sandbox selection lives. It never marks work
+    done; it resets the affected task to pending and records the old blocker
+    as a resolved platform-owned workspace-policy failure.
+    """
+    codex = ((cfg or {}).get("backends") or {}).get("codex") or {}
+    if os.name != "nt" or codex.get("ignore_user_config") is not False:
+        return []
+    if not projstate.exists(agentic_dir):
+        return []
+
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []})
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or not \
+                _is_windows_codex_readonly_detail(
+                    task.get("blocking_reason")):
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not _is_windows_codex_readonly_detail(blocker.get("reason")):
+                continue
+            blocker.update({
+                "resolved": True,
+                "code": projstate.BLOCKER_CODE_POLICY_DENIED,
+                "failure_class": "workspace_policy_denied",
+                "platform_owned": True,
+                "retryable": True,
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_windows_codex_readonly_blocker",
+            "resolved_blockers": resolved,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
 
 
 # -- 6. task-state reconciliation -----------------------------------------------
@@ -97,6 +164,8 @@ def _is_legacy_platform_cycle_detail(detail_text):
     if bootstrap_gate._is_legacy_expected_paths_contract_block(   # noqa: SLF001
             {"blocking_reason": text}):
         return True
+    if _is_windows_codex_readonly_detail(text):
+        return True
     return False
 
 
@@ -137,9 +206,10 @@ def reconstruct_failure_streak(agentic_dir, scheduler):
             continue   # never affected the streak in the first place
         run_id = event.get("run_id")
         classified = classified_by_run.get(run_id)
-        is_platform = bool(classified.get("platform_class")) \
-            if classified is not None \
-            else _is_legacy_platform_cycle_detail(event.get("detail"))
+        # Known persisted platform signatures remain authoritative even when
+        # an older classifier incorrectly recorded platform_class=false.
+        is_platform = _is_legacy_platform_cycle_detail(event.get("detail")) or \
+            bool(classified and classified.get("platform_class"))
         record = {"run_id": run_id, "task": event.get("task_id"),
                  "outcome": outcome, "detail": event.get("detail")}
         (platform_removed if is_platform else genuine).append(record)
@@ -198,9 +268,12 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     stages["stale_lease_recovery"] = _stale_lease_recovery(
         agentic_dir, cfg, clock)
 
+    windows_codex_events = recover_windows_codex_readonly_blocker(
+        agentic_dir, cfg)
     migrated = list(bootstrap_gate.recover_bootstrap_deadlock(agentic_dir))
     migrated += list(bootstrap_gate.recover_expected_paths_contract_bug(
         agentic_dir))
+    migrated += windows_codex_events
     stages["blocker_code_migration"] = _stage("blocker_code_migration",
                                               migrated)
 
@@ -214,7 +287,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     stages["fixed_platform_defect_recovery"] = _stage(
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
-        contract_events)
+        contract_events + windows_codex_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
