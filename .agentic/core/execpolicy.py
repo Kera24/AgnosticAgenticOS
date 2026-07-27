@@ -12,6 +12,7 @@ Rules enforced here (not in prompts):
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 
@@ -36,6 +37,32 @@ def parse_command(cmd):
     raise errors.PolicyError("unsupported command type: %r" % type(cmd))
 
 
+
+def resolve_argv_executable(argv, env=None, platform=None, which=None):
+    """Resolve a bare executable on native Windows without enabling a shell.
+
+    Windows developer tools installed through npm are commonly exposed as
+    npm.cmd/npx.cmd. CreateProcess does not reliably resolve a bare npm token
+    when invoked through Python with shell=False. Resolve only argv[0] through
+    PATH/PATHEXT after policy/allowlist matching; explicit paths and every
+    argument after argv[0] remain byte-for-byte unchanged. Missing commands
+    remain unchanged so the normal, typed FileNotFoundError path still reports
+    exit 127.
+    """
+    resolved = list(argv or [])
+    platform = platform or os.name
+    if platform != "nt" or not resolved:
+        return resolved
+    command = resolved[0]
+    if os.path.dirname(command):
+        return resolved
+    which = which or shutil.which
+    search_path = (env or os.environ).get("PATH")
+    found = which(command, path=search_path)
+    if found:
+        resolved[0] = found
+    return resolved
+
 def run_command(cmd, cwd, timeout, env=None, shell_required=False,
                 source="config", stdin_text=None, extra_env=None):
     """Execute one command under policy. Returns a result dict; raises
@@ -52,7 +79,8 @@ def run_command(cmd, cwd, timeout, env=None, shell_required=False,
         popen_cmd, use_shell = cmd, True
         argv_logged = ["<shell>", cmd]
     else:
-        popen_cmd, use_shell = parse_command(cmd), False
+        popen_cmd = resolve_argv_executable(parse_command(cmd), env=run_env)
+        use_shell = False
         argv_logged = popen_cmd
 
     started = time.time()
