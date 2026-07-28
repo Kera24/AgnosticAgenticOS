@@ -224,6 +224,100 @@ def recover_windows_command_resolution_blocker(agentic_dir, cfg):
     return events
 
 
+
+# -- fixed omission of canonical task-specific deterministic checks ------------
+
+_QA_MISSING_TASK_GATE_RE = re.compile(
+    r"^QA: .*required deterministic .*gate is not evidenced", re.I)
+
+
+def _missing_task_gate_evidence(agentic_dir, task_id):
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if contract.get("task_id") != task_id:
+            continue
+        required = [str(command) for command in
+                    contract.get("deterministic_checks") or []]
+        observed = set()
+        validation_paths = sorted(glob.glob(
+            os.path.join(cycle_dir, "validation-result-*.json")))
+        for validation_path in validation_paths:
+            try:
+                with open(validation_path, encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            observed.update(str(result.get("command") or "")
+                            for result in validation.get("results") or [])
+        missing = [command for command in required if command not in observed]
+        if missing:
+            return {
+                "run_id": contract.get("run_id") or
+                          os.path.basename(cycle_dir).replace("cycle-", "", 1),
+                "evidence_ref": contract_path,
+                "missing_commands": missing,
+                "observed_commands": sorted(observed),
+            }
+        return None
+    return None
+
+
+def recover_missing_task_gate_blocker(agentic_dir, cfg, memory_dir):
+    """Retry only when artifacts prove the canonical task check was omitted."""
+    if not projstate.exists(agentic_dir):
+        return []
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []})
+    blockers = blockers_doc.get("blockers", [])
+    backlog = {task["id"]: task for task in projstate.load_backlog(agentic_dir)}
+    events = []
+    for task_id, task in backlog.items():
+        reason = task.get("blocking_reason") or ""
+        if task.get("status") != "blocked" or not \
+                _QA_MISSING_TASK_GATE_RE.search(reason):
+            continue
+        evidence = _missing_task_gate_evidence(agentic_dir, task_id)
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task_id:
+                continue
+            if not _QA_MISSING_TASK_GATE_RE.search(
+                    blocker.get("reason") or ""):
+                continue
+            blocker.update({
+                "resolved": True,
+                "code": projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+                "failure_class": "task_contract_invalid",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(agentic_dir, task_id, status="pending",
+                              blocking_reason=None, last_result=None,
+                              attempts=0)
+        events.append({
+            "task_id": task_id,
+            "action": "reset_missing_task_deterministic_gate",
+            "resolved_blockers": resolved,
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
 # -- 6. task-state reconciliation -----------------------------------------------
 
 def _task_state_reconciliation(agentic_dir):
@@ -277,6 +371,8 @@ def _is_legacy_platform_cycle_detail(detail_text):
             {"blocking_reason": text}):
         return True
     if _is_windows_codex_readonly_detail(text):
+        return True
+    if _QA_MISSING_TASK_GATE_RE.search(text):
         return True
     return False
 
@@ -384,25 +480,32 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         agentic_dir, cfg)
     windows_command_events = recover_windows_command_resolution_blocker(
         agentic_dir, cfg)
+    memory_dir = os.path.join(str(agentic_dir), "memory")
+    task_gate_events = recover_missing_task_gate_blocker(
+        agentic_dir, cfg, memory_dir)
     migrated = list(bootstrap_gate.recover_bootstrap_deadlock(agentic_dir))
     migrated += list(bootstrap_gate.recover_expected_paths_contract_bug(
         agentic_dir))
     migrated += windows_codex_events
     migrated += windows_command_events
+    migrated += task_gate_events
     stages["blocker_code_migration"] = _stage("blocker_code_migration",
                                               migrated)
 
     aggregate_events = parallel_recovery.recover_parallel_candidate_aggregate(
         agentic_dir)
-    memory_dir = os.path.join(str(agentic_dir), "memory")
-    for event in windows_command_events:
+    for event in windows_command_events + task_gate_events:
         logs.decision(memory_dir, {
             "event": "failure_classified",
             "run_id": event["run_id"],
             "task_id": event["task_id"],
-            "failure_class": "platform_capability_missing",
+            "failure_class": (
+                "platform_capability_missing"
+                if event.get("action") ==
+                "reset_windows_command_resolution_blocker"
+                else "task_contract_invalid"),
             "platform_class": True,
-            "corrected_by": "windows_command_resolution_recovery",
+            "corrected_by": event.get("action"),
             "evidence_ref": event["evidence_ref"],
         })
     contract_events = contract_recovery.recover_contract_divergence_blockers(
@@ -415,7 +518,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     stages["fixed_platform_defect_recovery"] = _stage(
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
-        contract_events + windows_codex_events + windows_command_events)
+        contract_events + windows_codex_events + windows_command_events +
+        task_gate_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
