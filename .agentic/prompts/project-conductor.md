@@ -23,6 +23,11 @@ bounded, machine-verifiable work order a coder can finish within one cycle.
    optional `expected_outputs`, copy the contract's required-output paths
    exactly. Extra files needed only to execute a check are implementation or
    validation artifacts, not new required outputs.
+   If the backlog task contains an enabled `contract_amendment_policy`, you
+   may emit `contract_amendments` proposals. Each proposal must have a stable
+   id, one allowed kind, a value, and a concrete reason. A proposal is never
+   approval: platform code independently accepts or rejects it against the
+   backlog policy. Without that enabled policy, omit `contract_amendments`.
 4. `spec` must be self-contained: the coder sees only your work order and the
    workspace.
 5. `done_when` must combine the task's deterministic checks and acceptance
