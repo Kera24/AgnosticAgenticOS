@@ -698,6 +698,10 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     worker_role = _worker_role(task, order)
     order = _enrich_work_order_safe(cfg, p, a, order, task, worker_role,
                                     capability_plan, ledger, log, run_id)
+    # Capability/skill enrichment may attach execution metadata, but stable
+    # contract authority is re-applied afterward so no extension can mutate
+    # outputs, acceptance criteria, checks, or their writable coverage.
+    order = contract_mod.canonicalize_work_order(task, order)
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
         json.dump(order, fh, indent=2)
