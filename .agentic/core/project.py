@@ -993,10 +993,16 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                             "instruction": "revert or move out-of-scope changes"}
                 continue
 
+            bootstrap_ok, _bootstrap_reason = \
+                bootstrap_gate.bootstrap_eligible(
+                    task, projstate.load_backlog(a),
+                    bootstrap_gate.decisions_text(a))
+            task_checks = [] if bootstrap_ok else \
+                (task_contract.get("deterministic_checks") or [])
             gate_result = gate.run_checks(
                 cfg, worktree,
                 os.path.join(run_dir, "checks-%d" % coder_calls),
-                required_commands=task_contract.get("deterministic_checks") or [])
+                required_commands=task_checks)
             if gate_result["no_checks"]:
                 # "no checks configured" is NEVER a pass -- but a task the
                 # architect itself classified as bootstrap/scaffolding, in a
