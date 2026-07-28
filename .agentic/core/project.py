@@ -656,9 +656,13 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
 
     # conductor -------------------------------------------------------------------
     project_worktree = ensure_project_worktree(cfg, p)
+    contract_seed = contract_mod.build_task_contract(
+        task, {}, cfg.get("project", {}).get("name"), run_id=run_id)
     conducted = caller(
         "conductor", load_prompt("project-conductor.md", shared=False),
         {"task": task,
+         "task_contract": contract_seed,
+         "contract_authority": "backlog",
          "architecture": (projstate.read_yaml(a, "progress.yaml", {}) or {}),
          "repository_files": _snapshot(project_worktree,
                                        ["**"])["file_list"][:300],
@@ -673,7 +677,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     else "failure", "conductor failed: %s" % kind, retry,
                     failure_class=failures.EXECUTION_TIMEOUT
                     if kind == "timeout" else None)
-    order = conducted["structured_output"]
+    proposed_order = conducted["structured_output"]
+    _persist_evidence(run_dir, "conductor-work-order.json", proposed_order)
+    order = contract_mod.canonicalize_work_order(task, proposed_order)
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
         json.dump(order, fh, indent=2)
