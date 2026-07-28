@@ -513,6 +513,9 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     contract_events += \
         contract_recovery.recover_fixed_contract_comparison_blockers(
             agentic_dir, memory_dir, cfg)
+    contract_events += \
+        contract_recovery.recover_stable_contract_authority_blockers(
+            agentic_dir, memory_dir, cfg)
     stages["aggregate_candidate_cause_reconstruction"] = _stage(
         "aggregate_candidate_cause_reconstruction", aggregate_events)
     stages["fixed_platform_defect_recovery"] = _stage(
