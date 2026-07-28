@@ -103,6 +103,7 @@
       }
     },
     "expected_outputs": {
+      "description": "Audit projection only. In stable mode the platform replaces this list with canonical backlog required-output paths; the conductor cannot expand task scope.",
       "type": "array",
       "items": {
         "type": "string"
