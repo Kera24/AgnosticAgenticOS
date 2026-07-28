@@ -214,6 +214,98 @@ def recover_fixed_contract_comparison_blockers(agentic_dir, memory_dir, cfg):
     return events
 
 
+
+
+def _conductor_expansion_artifact(agentic_dir, task_id):
+    """Find a saved contract blocked only by conductor output expansion."""
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if contract.get("task_id") != task_id:
+            continue
+        divergences = contract_mod.find_work_order_divergences(contract)
+        if divergences:
+            return {
+                "run_id": contract.get("run_id") or
+                          os.path.basename(cycle_dir).replace("cycle-", "", 1),
+                "evidence_ref": path,
+                "discarded_conductor_outputs":
+                    contract.get("work_order_expected_outputs") or [],
+                "canonical_required_outputs": [
+                    entry.get("path")
+                    for entry in contract.get("required_outputs") or []],
+            }
+        return None
+    return None
+
+
+def recover_stable_contract_authority_blockers(
+        agentic_dir, memory_dir, cfg):
+    """Reset pre-fix blockers caused by conductor-added expected outputs.
+
+    Stable authority now deterministically projects every future work order
+    back onto backlog expected_paths. Retrying is therefore safe; recovery
+    never adds the conductor's proposal to the contract and never marks work
+    complete.
+    """
+    if not projstate.exists(agentic_dir):
+        return []
+    backlog = {task["id"]: task for task in
+               projstate.load_backlog(agentic_dir)}
+    blockers_doc = projstate.read_yaml(agentic_dir, "blockers.yaml",
+                                       {"blockers": []})
+    events = []
+    changed = False
+    for blocker in blockers_doc.get("blockers", []):
+        if blocker.get("resolved") or blocker.get("code") != \
+                projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH:
+            continue
+        reason = blocker.get("reason") or ""
+        if "work-order expected output" not in reason or \
+                "required_outputs" not in reason:
+            continue
+        task_id = blocker.get("task")
+        task = backlog.get(task_id)
+        if task is None or task.get("status") != "blocked":
+            continue
+        evidence = _conductor_expansion_artifact(agentic_dir, task_id)
+        if not evidence:
+            continue
+        blocker.update({
+            "resolved": True,
+            "resolved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "failure_class": "task_contract_invalid",
+            "platform_owned": True,
+            "retryable": True,
+            "evidence_ref": evidence["evidence_ref"],
+        })
+        projstate.update_task(agentic_dir, task_id, status="pending",
+                              blocking_reason=None, last_result=None,
+                              attempts=0)
+        memory_event = _supersede_blocker_memory(
+            cfg, memory_dir, blocker,
+            "stable contract authority enabled: conductor-added outputs "
+            "discarded; backlog contract remains authoritative; task reset "
+            "to pending, never marked complete")
+        events.append({
+            "task_id": task_id,
+            "action": "reset_conductor_contract_expansion",
+            "resolved_blockers": 1,
+            "memory_superseded": bool(memory_event),
+            **evidence,
+        })
+        changed = True
+    if changed:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
 def recover_contract_divergence_blockers(agentic_dir, memory_dir, cfg,
                                          task_entries=None):
     """Self-heal for tasks blocked on the legacy canonical-contract-
