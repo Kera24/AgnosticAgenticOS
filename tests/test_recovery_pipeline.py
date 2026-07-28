@@ -70,6 +70,19 @@ def test_recovery_pipeline_is_idempotent(sandbox):
     assert tasks["t1-init-repo"]["status"] == "pending"
 
 
+def test_windows_codex_readonly_signatures_include_specialist_role_failures():
+    details = [
+        "Workspace filesystem is read-only, so required edits to "
+        "src/index.js and tests/ui.test.js cannot be made.",
+        "Workspace filesystem is read-only, so required edits within "
+        "allowed_paths cannot be made",
+    ]
+    assert all(recovery._is_windows_codex_readonly_detail(d)
+               for d in details)
+    assert not recovery._is_windows_codex_readonly_detail(
+        "Repository policy intentionally makes this workspace read-only")
+
+
 def test_recovery_clears_fixed_windows_codex_readonly_blocker(
         sandbox, monkeypatch):
     project_cfg(sandbox)
