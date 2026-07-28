@@ -12,6 +12,7 @@ order (work-order.json) -- both already the source of truth. No
 migration of existing project state is required; a project started
 before this module existed produces a perfectly valid contract from its
 existing task/order shape (missing fields simply come back empty)."""
+import copy
 import datetime as _dt
 import hashlib
 import json
@@ -38,6 +39,38 @@ REQUIRED_CONTRACT_FIELDS = (
 )
 
 
+
+
+def canonicalize_work_order(task, order):
+    """Project the conductor's plan onto the immutable backlog contract.
+
+    The conductor may describe implementation details and widen safe write
+    paths, but it cannot add required outputs, acceptance criteria, or
+    deterministic checks. Those fields are copied from the backlog task,
+    which is the stable kernel's single authority.
+    """
+    task = task or {}
+    result = copy.deepcopy(order or {})
+    required = [bootstrap_gate.normalize_expected_entry(entry)
+                for entry in task.get("expected_paths") or []]
+    result["expected_outputs"] = [entry["path"] for entry in required]
+    result["acceptance_criteria"] = list(
+        task.get("acceptance_criteria") or [])
+    result["deterministic_checks"] = list(
+        task.get("deterministic_checks") or [])
+
+    allowed = list(result.get("allowed_paths") or [])
+    for entry in required:
+        # JSON-member requirements use package.json#scripts.test in the
+        # acceptance contract, while the writable filesystem path is the
+        # document before the fragment.
+        writable = entry["path"].split("#", 1)[0]
+        if not any(pattern == writable or
+                   gitops.match_pattern(writable, pattern)
+                   for pattern in allowed):
+            allowed.append(writable)
+    result["allowed_paths"] = allowed
+    return result
 def build_task_contract(task, order, project_id, run_id=None,
                         decision_classifications=None):
     """Assemble the canonical contract from an existing backlog task +
