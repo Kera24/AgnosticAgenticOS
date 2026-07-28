@@ -35,7 +35,7 @@ from core import modelres
 from .cli_base import (CLIBackendBase, classify_cli_failure, compose_prompt,
                        parse_retry_hint, validate_cli_command)
 
-WRITE_ROLES = {"coder", "worker"}
+WRITE_ROLES = {"coder", "worker", "ui_designer"}
 SMOKE_MARKER = "CODEX_SMOKE_OK"
 
 
