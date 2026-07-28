@@ -702,6 +702,15 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     # contract authority is re-applied afterward so no extension can mutate
     # outputs, acceptance criteria, checks, or their writable coverage.
     order = contract_mod.canonicalize_work_order(task, order)
+    with open(os.path.join(run_dir, "contract-amendments.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({
+            "authority": order.get("contract_authority"),
+            "policy": task.get("contract_amendment_policy") or {
+                "enabled": False},
+            "proposals": order.get("contract_amendments") or [],
+            "decisions": order.get("contract_amendment_decisions") or [],
+        }, fh, indent=2, default=str)
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
         json.dump(order, fh, indent=2)
