@@ -319,6 +319,98 @@ def recover_missing_task_gate_blocker(agentic_dir, cfg, memory_dir):
 
 
 
+# -- legacy QA semantic-evidence omission ------------------------------------
+
+_QA_FILTER_EVIDENCE_RE = re.compile(
+    r"^QA: .*required filter coverage is not satisfied", re.I | re.S)
+
+
+def _passing_filter_coverage_evidence(agentic_dir, task_id):
+    """Return archived evidence only when every mandatory check passed and
+    its bounded output names the filter behaviours QA could not previously
+    see because _review_input discarded command details."""
+    pattern = os.path.join(str(agentic_dir), "runs", "cycle-*")
+    for cycle_dir in sorted(glob.glob(pattern), reverse=True):
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if contract.get("task_id") != task_id:
+            continue
+        validations = []
+        for path in sorted(glob.glob(os.path.join(
+                cycle_dir, "validation-result-*.json"))):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    validations.append(json.load(fh))
+            except (OSError, ValueError):
+                continue
+        if not validations:
+            return None
+        results = [result for validation in validations
+                   for result in validation.get("results") or []
+                   if result.get("mandatory")]
+        if not results or not all(result.get("passed") for result in results):
+            return None
+        details = "\n".join(str(result.get("detail") or "")
+                            for result in results).lower()
+        if "active" not in details or "completed" not in details or \
+                ("filter" not in details and "all" not in details):
+            return None
+        return {
+            "run_id": contract.get("run_id") or
+                      os.path.basename(cycle_dir).replace("cycle-", "", 1),
+            "evidence_ref": contract_path,
+        }
+    return None
+
+
+def recover_qa_semantic_evidence_blocker(agentic_dir):
+    """Reset only the historical filter-coverage rejection caused by QA
+    receiving booleans without the already-passing named subtest output."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        reason = task.get("blocking_reason") or ""
+        if task.get("status") != "blocked" or not \
+                _QA_FILTER_EVIDENCE_RE.search(reason):
+            continue
+        evidence = _passing_filter_coverage_evidence(
+            agentic_dir, task["id"])
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not _QA_FILTER_EVIDENCE_RE.search(blocker.get("reason") or ""):
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "legacy_qa_evidence_omission",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_qa_semantic_evidence_blocker",
+            "resolved_blockers": resolved,
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
 # -- fixed whole-diff secret-scan blocker ------------------------------------
 
 def recover_whole_diff_secret_scan_blocker(agentic_dir):
@@ -577,6 +669,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     memory_dir = os.path.join(str(agentic_dir), "memory")
     task_gate_events = recover_missing_task_gate_blocker(
         agentic_dir, cfg, memory_dir)
+    qa_evidence_events = recover_qa_semantic_evidence_blocker(agentic_dir)
     secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
     integration_events = recover_stale_task_integration_blocker(
         agentic_dir, root, scheduler)
@@ -619,7 +712,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
         contract_events + windows_codex_events + windows_command_events +
-        task_gate_events + secret_scan_events + integration_events)
+        task_gate_events + qa_evidence_events + secret_scan_events +
+        integration_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
