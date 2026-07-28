@@ -112,6 +112,11 @@ Model Capability Registry + Hierarchical Orchestration (Phase 8/9):
   python .agentic/run models select <role> [risk]   explainable routing
   python .agentic/run models capacity               frontier reserve status
 
+Advanced feature promotion gates:
+  python .agentic/run features status <project-id> [feature]
+  python .agentic/run features promote <project-id> <feature> <state>
+                                        state: disabled|shadow|canary|stable
+
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
 
@@ -1379,6 +1384,66 @@ def cmd_ui(cfg, args):
                   dev_origin=args.dev)
 
 
+def cmd_features(cfg, args):
+    """Inspect or explicitly promote project-scoped advanced features."""
+    from core import projectops
+    from core.featuregates import FeatureGateRegistry, STATES
+    from core.registry import ProjectRegistry
+
+    action = args.plan or "status"
+    extra = list(args.extra or [])
+    if not extra:
+        print("usage: features status <project-id> [feature] | "
+              "features promote <project-id> <feature> <state>",
+              file=sys.stderr)
+        return 2
+    project_id = extra[0]
+    registry = ProjectRegistry()
+    record = projectops.resolve_project(registry, project_id)
+    project_cfg = projectops.project_cfg_for(cfg, registry, record)
+    memory_dir = os.path.join(
+        project_cfg["runtime"]["project_dir"], "memory")
+    gates = FeatureGateRegistry(memory_dir, project_cfg)
+
+    if action == "status":
+        requested = extra[1] if len(extra) > 1 else None
+        names = ([requested] if requested else sorted(
+            set((project_cfg.get("advanced_features") or {}).keys()) |
+            set(gates.data.get("features", {}).keys()) |
+            {"contract_amendments"}))
+        _print({
+            "project": project_id,
+            "features": {name: gates.status(name) for name in names},
+        })
+        return 0
+    if action == "promote":
+        if len(extra) < 3 or extra[2] not in STATES:
+            print("usage: features promote <project-id> <feature> "
+                  "<disabled|shadow|canary|stable>", file=sys.stderr)
+            return 2
+        feature, target = extra[1], extra[2]
+        feature_cfg = (
+            (project_cfg.get("advanced_features") or {}).get(feature)
+            or {})
+        minimum = int(feature_cfg.get("promotion_min_successes", 1))
+        try:
+            decision = gates.promote(
+                feature, target, minimum_successes=minimum)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        _print({
+            "project": project_id,
+            "feature": feature,
+            "promoted_to": target,
+            "decision": decision,
+            "evidence": gates.status(feature),
+        })
+        return 0
+    print("unknown features action %r" % action, file=sys.stderr)
+    return 2
+
+
 COMMANDS = {
     "doctor": cmd_doctor, "tick": cmd_tick, "queue": cmd_queue,
     "trust": cmd_trust, "audit": cmd_audit, "goals": cmd_goals,
@@ -1392,7 +1457,7 @@ COMMANDS = {
     "knowledge": cmd_knowledge, "skills": cmd_skills,
     "project": cmd_project, "fleet": cmd_fleet, "mcp": cmd_mcp,
     "capability": cmd_capability, "plugin": cmd_plugin,
-    "models": cmd_models,
+    "models": cmd_models, "features": cmd_features,
     "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
     "status": cmd_status, "logs": cmd_logs, "dashboard": cmd_dashboard,
 }
