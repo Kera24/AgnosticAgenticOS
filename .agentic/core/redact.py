@@ -5,9 +5,9 @@ import os
 import re
 
 _PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI-style keys
-    re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}"),        # Anthropic keys
-    re.compile(r"sk-or-[A-Za-z0-9_\-]{16,}"),         # OpenRouter keys
+    re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI-style keys
+    re.compile(r"(?<![A-Za-z0-9_])sk-ant-[A-Za-z0-9_\-]{16,}"),        # Anthropic keys
+    re.compile(r"(?<![A-Za-z0-9_])sk-or-[A-Za-z0-9_\-]{16,}"),         # OpenRouter keys
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),        # GitHub tokens
     re.compile(r"xox[abprs]-[A-Za-z0-9\-]{10,}"),     # Slack tokens
     re.compile(r"AKIA[0-9A-Z]{16}"),                  # AWS access key ids
