@@ -1504,8 +1504,17 @@ def _review_input(order, worktree, gate_result, task=None):
             "deterministic_checks": {
                 "ok": gate_result["ok"],
                 "tests": gate_result.get("tests", "not_configured_yet"),
-                "results": [{k: r[k] for k in ("name", "passed", "mandatory")}
-                            for r in gate_result["results"]]}}
+                "results": [
+                    {"name": r["name"],
+                     "passed": r["passed"],
+                     "mandatory": r["mandatory"],
+                     "command": r.get("command"),
+                     # Preserve bounded semantic evidence (for example named
+                     # subtests) so QA can judge coverage instead of seeing
+                     # only a boolean. Keep the cap small enough that a noisy
+                     # suite cannot consume the reviewer context budget.
+                     "detail": (r.get("detail") or "")[:1200]}
+                    for r in gate_result["results"]]}}
 
 
 def _handoff_payload(order, worktree, gate_result, remaining_chain):
