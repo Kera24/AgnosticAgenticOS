@@ -142,7 +142,14 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None,
     commands, auto = resolve_commands(cfg, workdir)
     commands = list(commands)
     existing = {str(c.get("command")) for c in commands}
-    for index, raw in enumerate(required_commands or [], 1):
+    # Explicit administrator verification commands are authoritative (and
+    # are used by network-free acceptance fixtures as safe substitutes).
+    # Canonical task checks augment auto-detection, or can be opted into
+    # alongside explicit checks with include_task_checks: true.
+    include_task_checks = auto or bool(
+        (cfg.get("verification") or {}).get("include_task_checks", False))
+    for index, raw in enumerate(
+            (required_commands or []) if include_task_checks else [], 1):
         check = dict(raw) if isinstance(raw, dict) else {
             "name": "task-deterministic-%d" % index,
             "command": str(raw),
