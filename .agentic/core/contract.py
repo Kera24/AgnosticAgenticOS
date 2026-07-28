@@ -48,7 +48,7 @@ def _amendment_allowed_path(path, policy):
         for pattern in patterns)
 
 
-def evaluate_contract_amendments(task, proposals):
+def evaluate_contract_amendments(task, proposals, feature_gate=None):
     """Deterministically approve or reject conductor amendment proposals.
 
     Authority lives exclusively in the backlog task's amendment policy. A
@@ -57,6 +57,14 @@ def evaluate_contract_amendments(task, proposals):
     as run evidence and is the only input used when amendments are applied.
     """
     task = task or {}
+    feature_gate = copy.deepcopy(feature_gate or {
+        "feature": "contract_amendments",
+        "configured_state": "stable",
+        "effective_state": "stable",
+        "active": True,
+        "observe_only": False,
+        "source": "direct_contract_api",
+    })
     policy = task.get("contract_amendment_policy") or {}
     enabled = policy.get("enabled") is True
     allowed_kinds = set(policy.get("allowed_kinds") or [])
@@ -112,6 +120,12 @@ def evaluate_contract_amendments(task, proposals):
         else:
             code = "unsupported_kind"
 
+        would_accept = accepted
+        if accepted and not feature_gate.get("active"):
+            accepted = False
+            code = ("shadow_observation"
+                    if feature_gate.get("observe_only")
+                    else "feature_not_active")
         seen_ids.add(amendment_id)
         decisions.append({
             "id": amendment_id,
@@ -120,8 +134,10 @@ def evaluate_contract_amendments(task, proposals):
             "normalized_value": normalized,
             "reason": reason,
             "accepted": accepted,
+            "would_accept": would_accept,
             "decision_code": code,
             "authority": "backlog_policy",
+            "feature_gate": copy.deepcopy(feature_gate),
         })
     return decisions
 
@@ -161,7 +177,7 @@ def _apply_approved_amendments(result, decisions):
     return result
 
 
-def canonicalize_work_order(task, order):
+def canonicalize_work_order(task, order, feature_gate=None):
     """Project a conductor plan onto backlog authority plus approved amendments."""
     task = task or {}
     result = copy.deepcopy(order or {})
@@ -182,8 +198,18 @@ def canonicalize_work_order(task, order):
             allowed.append(writable)
     result["allowed_paths"] = allowed
 
+    effective_gate = copy.deepcopy(
+        feature_gate or result.get("contract_feature_gate") or {
+            "feature": "contract_amendments",
+            "configured_state": "stable",
+            "effective_state": "stable",
+            "active": True,
+            "observe_only": False,
+            "source": "direct_contract_api",
+        })
     decisions = evaluate_contract_amendments(
-        task, result.get("contract_amendments") or [])
+        task, result.get("contract_amendments") or [], effective_gate)
+    result["contract_feature_gate"] = effective_gate
     result["contract_amendment_decisions"] = decisions
     result["contract_authority"] = "backlog+approved_amendments"
     return _apply_approved_amendments(result, decisions)
