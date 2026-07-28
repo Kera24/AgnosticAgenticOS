@@ -173,6 +173,12 @@ def test_approved_amendment_changes_contract_identity():
 
 def test_authorized_amendment_flows_through_complete_cycle(sandbox):
     cfg = project_cfg(sandbox)
+    cfg["project"]["name"] = "amendment-canary"
+    cfg["advanced_features"] = {
+        "contract_amendments": {
+            "state": "canary",
+            "canary_projects": ["amendment-canary"],
+        }}
     cfg["verification"]["commands"] = [{
         "name": "safe-pass",
         "command": "python -c \"import sys; sys.exit(0)\"",
@@ -223,6 +229,8 @@ def test_authorized_amendment_flows_through_complete_cycle(sandbox):
     with open(os.path.join(run_dir, "contract-amendments.json"),
               encoding="utf-8") as handle:
         ledger = json.load(handle)
+    assert ledger["feature_gate"]["effective_state"] == "canary"
+    assert ledger["feature_gate"]["active"] is True
     decisions = {item["id"]: item for item in ledger["decisions"]}
     assert decisions["approved-report"]["accepted"] is True
     assert decisions["rejected-env"]["accepted"] is False
