@@ -41,14 +41,128 @@ REQUIRED_CONTRACT_FIELDS = (
 
 
 
-def canonicalize_work_order(task, order):
-    """Project the conductor's plan onto the immutable backlog contract.
+def _amendment_allowed_path(path, policy):
+    patterns = list(policy.get("allowed_paths") or [])
+    return bool(patterns) and any(
+        path == pattern or gitops.match_pattern(path, pattern)
+        for pattern in patterns)
 
-    The conductor may describe implementation details and widen safe write
-    paths, but it cannot add required outputs, acceptance criteria, or
-    deterministic checks. Those fields are copied from the backlog task,
-    which is the stable kernel's single authority.
+
+def evaluate_contract_amendments(task, proposals):
+    """Deterministically approve or reject conductor amendment proposals.
+
+    Authority lives exclusively in the backlog task's amendment policy. A
+    model cannot enable the policy, add an allowed kind/path/command, or mark
+    its own proposal approved. The returned decision ledger is safe to persist
+    as run evidence and is the only input used when amendments are applied.
     """
+    task = task or {}
+    policy = task.get("contract_amendment_policy") or {}
+    enabled = policy.get("enabled") is True
+    allowed_kinds = set(policy.get("allowed_kinds") or [])
+    allowed_commands = set(policy.get("allowed_commands") or [])
+    decisions = []
+    seen_ids = set()
+    for index, raw in enumerate(proposals or [], 1):
+        proposal = copy.deepcopy(raw) if isinstance(raw, dict) else {}
+        amendment_id = str(proposal.get("id") or "amendment-%d" % index)
+        kind = str(proposal.get("kind") or "")
+        value = proposal.get("value")
+        reason = str(proposal.get("reason") or "").strip()
+        accepted = False
+        code = "policy_disabled"
+        normalized = None
+
+        if amendment_id in seen_ids:
+            code = "duplicate_id"
+        elif not enabled:
+            code = "policy_disabled"
+        elif kind not in allowed_kinds:
+            code = "kind_not_authorized"
+        elif not reason:
+            code = "reason_required"
+        elif kind == "required_output":
+            try:
+                normalized = bootstrap_gate.normalize_expected_entry(value)
+            except (KeyError, TypeError, ValueError):
+                code = "invalid_required_output"
+            else:
+                if _amendment_allowed_path(normalized["path"], policy):
+                    accepted, code = True, "approved"
+                else:
+                    code = "path_not_authorized"
+        elif kind == "allowed_path":
+            normalized = str(value or "").strip()
+            if normalized and normalized in set(policy.get("allowed_paths") or []):
+                accepted, code = True, "approved"
+            else:
+                code = "path_not_authorized"
+        elif kind == "deterministic_check":
+            normalized = str(value or "").strip()
+            if normalized and normalized in allowed_commands:
+                accepted, code = True, "approved"
+            else:
+                code = "command_not_authorized"
+        elif kind == "acceptance_criterion":
+            normalized = str(value or "").strip()
+            if normalized and len(normalized) <= 500:
+                accepted, code = True, "approved"
+            else:
+                code = "invalid_acceptance_criterion"
+        else:
+            code = "unsupported_kind"
+
+        seen_ids.add(amendment_id)
+        decisions.append({
+            "id": amendment_id,
+            "kind": kind,
+            "value": value,
+            "normalized_value": normalized,
+            "reason": reason,
+            "accepted": accepted,
+            "decision_code": code,
+            "authority": "backlog_policy",
+        })
+    return decisions
+
+
+def _apply_approved_amendments(result, decisions):
+    expected = list(result.get("expected_outputs") or [])
+    criteria = list(result.get("acceptance_criteria") or [])
+    checks = list(result.get("deterministic_checks") or [])
+    allowed = list(result.get("allowed_paths") or [])
+
+    for decision in decisions:
+        if not decision.get("accepted"):
+            continue
+        kind = decision["kind"]
+        value = decision.get("normalized_value")
+        if kind == "required_output":
+            path = value["path"]
+            if path not in expected:
+                expected.append(path)
+            writable = path.split("#", 1)[0]
+            if not any(
+                    pattern == writable or
+                    gitops.match_pattern(writable, pattern)
+                    for pattern in allowed):
+                allowed.append(writable)
+        elif kind == "allowed_path" and value not in allowed:
+            allowed.append(value)
+        elif kind == "deterministic_check" and value not in checks:
+            checks.append(value)
+        elif kind == "acceptance_criterion" and value not in criteria:
+            criteria.append(value)
+
+    result["expected_outputs"] = expected
+    result["acceptance_criteria"] = criteria
+    result["deterministic_checks"] = checks
+    result["allowed_paths"] = allowed
+    return result
+
+
+def canonicalize_work_order(task, order):
+    """Project a conductor plan onto backlog authority plus approved amendments."""
     task = task or {}
     result = copy.deepcopy(order or {})
     required = [bootstrap_gate.normalize_expected_entry(entry)
@@ -61,16 +175,20 @@ def canonicalize_work_order(task, order):
 
     allowed = list(result.get("allowed_paths") or [])
     for entry in required:
-        # JSON-member requirements use package.json#scripts.test in the
-        # acceptance contract, while the writable filesystem path is the
-        # document before the fragment.
         writable = entry["path"].split("#", 1)[0]
         if not any(pattern == writable or
                    gitops.match_pattern(writable, pattern)
                    for pattern in allowed):
             allowed.append(writable)
     result["allowed_paths"] = allowed
-    return result
+
+    decisions = evaluate_contract_amendments(
+        task, result.get("contract_amendments") or [])
+    result["contract_amendment_decisions"] = decisions
+    result["contract_authority"] = "backlog+approved_amendments"
+    return _apply_approved_amendments(result, decisions)
+
+
 def build_task_contract(task, order, project_id, run_id=None,
                         decision_classifications=None):
     """Assemble the canonical contract from an existing backlog task +
