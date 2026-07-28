@@ -19,6 +19,9 @@ superseded (never re-presented as a live constraint), attempts
 attributable to the defect are reset, and only the affected task's own
 prompt/context-cache entries are invalidated."""
 import datetime as _dt
+import glob
+import json
+import os
 import re
 
 from . import bootstrap_gate, cachestore, contract as contract_mod, projstate
@@ -129,6 +132,86 @@ def migrate_task_contract(agentic_dir, memory_dir, cfg, task_id,
             reason="canonical-contract-divergence migration for %s"
             % task_id)
     return added
+
+
+
+def _fixed_comparison_artifact(agentic_dir, task_id):
+    """Return immutable evidence only when the saved contract now passes.
+
+    This recovers false structural mismatches caused by the old comparison
+    treating explanatory work-order prose as a literal path. It never edits
+    the canonical contract and never clears a genuinely divergent artifact.
+    """
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if contract.get("task_id") != task_id:
+            continue
+        if not contract_mod.find_work_order_divergences(contract):
+            return {
+                "run_id": contract.get("run_id") or
+                          os.path.basename(cycle_dir).replace("cycle-", "", 1),
+                "evidence_ref": path,
+            }
+        return None
+    return None
+
+
+def recover_fixed_contract_comparison_blockers(agentic_dir, memory_dir, cfg):
+    """Reset a structural blocker proven false by its saved contract artifact."""
+    if not projstate.exists(agentic_dir):
+        return []
+    backlog = {t["id"]: t for t in projstate.load_backlog(agentic_dir)}
+    blockers_doc = projstate.read_yaml(agentic_dir, "blockers.yaml",
+                                       {"blockers": []})
+    events = []
+    changed = False
+    for blocker in blockers_doc.get("blockers", []):
+        if blocker.get("resolved") or blocker.get("code") != \
+                projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH:
+            continue
+        task_id = blocker.get("task")
+        task = backlog.get(task_id)
+        if task is None or task.get("status") != "blocked":
+            continue
+        evidence = _fixed_comparison_artifact(agentic_dir, task_id)
+        if not evidence:
+            continue
+        blocker.update({
+            "resolved": True,
+            "resolved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "failure_class": "task_contract_invalid",
+            "platform_owned": True,
+            "retryable": True,
+            "evidence_ref": evidence["evidence_ref"],
+        })
+        projstate.update_task(agentic_dir, task_id, status="pending",
+                              blocking_reason=None, last_result=None,
+                              attempts=0)
+        memory_event = _supersede_blocker_memory(
+            cfg, memory_dir, blocker,
+            "false structural-contract mismatch repaired: saved contract "
+            "artifact now validates under prose-aware output comparison; "
+            "task reset to pending, never marked complete")
+        events.append({
+            "task_id": task_id,
+            "action": "reset_false_structural_contract_mismatch",
+            "resolved_blockers": 1,
+            "memory_superseded": bool(memory_event),
+            **evidence,
+        })
+        changed = True
+    if changed:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
 
 
 def recover_contract_divergence_blockers(agentic_dir, memory_dir, cfg,
