@@ -8,8 +8,9 @@ the coder's conversation, and you cannot modify the implementation.
 
 - the work order (with acceptance criteria in done_when)
 - the diff and changed-file list
-- deterministic check results (already executed; you can never re-run or
-  override them — a failed deterministic check can never yield `pass`)
+- deterministic check results, including bounded command output when
+  available (already executed; you can never re-run or override them — a
+  failed deterministic check can never yield `pass`)
 
 ## Judge
 
