@@ -16,7 +16,7 @@ import re
 from . import backends, bootstrap_gate, capacity as capacity_mod
 from . import config as config_mod, contract as contract_mod
 from . import contract_recovery
-from . import decision_policy, execengine, failures, fscap
+from . import decision_policy, execengine, failures, featuregates, fscap
 from . import inventory as inventory_mod
 from . import parallel as parallel_mod
 from . import parallel_recovery
@@ -450,6 +450,17 @@ def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
          "detail": redact(str(detail))[:300],
          "cooling_until": until.isoformat(timespec="seconds"),
          "cooling_detail": cooling_detail})
+    try:
+        gate_events = featuregates.FeatureGateRegistry(
+            p["memory"], cfg).record_outcome(
+                run_id, outcome,
+                platform_failure=failures.is_platform_class(failure_class),
+                detail=detail)
+        for event in gate_events:
+            log(dict(event, event="feature_gate_rollback", run_id=run_id))
+    except Exception as exc:  # evidence must never alter cycle outcome
+        log({"event": "feature_gate_outcome_failed", "run_id": run_id,
+             "detail": str(exc)[:200]})
     progress = projstate.refresh_progress(p["agentic"])
     from .knowledge import update_knowledge
     update_knowledge(cfg, p["agentic"], log)
@@ -656,6 +667,9 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
 
     # conductor -------------------------------------------------------------------
     project_worktree = ensure_project_worktree(cfg, p)
+    feature_registry = featuregates.FeatureGateRegistry(p["memory"], cfg)
+    amendment_gate = feature_registry.decision(
+        "contract_amendments", cfg.get("project", {}).get("name"))
     contract_seed = contract_mod.build_task_contract(
         task, {}, cfg.get("project", {}).get("name"), run_id=run_id)
     conducted = caller(
@@ -663,6 +677,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
         {"task": task,
          "task_contract": contract_seed,
          "contract_authority": "backlog",
+         "feature_gates": {"contract_amendments": amendment_gate},
          "architecture": (projstate.read_yaml(a, "progress.yaml", {}) or {}),
          "repository_files": _snapshot(project_worktree,
                                        ["**"])["file_list"][:300],
@@ -679,7 +694,14 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     if kind == "timeout" else None)
     proposed_order = conducted["structured_output"]
     _persist_evidence(run_dir, "conductor-work-order.json", proposed_order)
-    order = contract_mod.canonicalize_work_order(task, proposed_order)
+    feature_registry.begin_run(
+        run_id, {"contract_amendments": amendment_gate}
+        if proposed_order.get("contract_amendments") else {})
+    _persist_evidence(
+        run_dir, "feature-gates.json",
+        {"contract_amendments": amendment_gate})
+    order = contract_mod.canonicalize_work_order(
+        task, proposed_order, feature_gate=amendment_gate)
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
         json.dump(order, fh, indent=2)
@@ -701,11 +723,13 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     # Capability/skill enrichment may attach execution metadata, but stable
     # contract authority is re-applied afterward so no extension can mutate
     # outputs, acceptance criteria, checks, or their writable coverage.
-    order = contract_mod.canonicalize_work_order(task, order)
+    order = contract_mod.canonicalize_work_order(
+        task, order, feature_gate=amendment_gate)
     with open(os.path.join(run_dir, "contract-amendments.json"), "w",
               encoding="utf-8") as fh:
         json.dump({
             "authority": order.get("contract_authority"),
+            "feature_gate": amendment_gate,
             "policy": task.get("contract_amendment_policy") or {
                 "enabled": False},
             "proposals": order.get("contract_amendments") or [],
