@@ -461,3 +461,102 @@ def test_artifact_backed_recovery_clears_only_now_valid_structural_blocker(
     assert events[0]["action"] == \
         "reset_false_structural_contract_mismatch"
     assert events[0]["run_id"] == "r9"
+
+
+def test_stable_projection_discards_conductor_scope_expansion():
+    task = simple_task(
+        "t5-task-list-renderer",
+        expected_paths=[
+            {"path": "src/components/task-list.html", "type": "file",
+             "required": True},
+            {"path": "tests/t5-renderer.test.js", "type": "file",
+             "required": True},
+        ],
+        acceptance_criteria=["renderer works"],
+        deterministic_checks=[
+            "node -e \"require('./dist/tests/t5-ui')\""])
+    proposed = _live_order(
+        expected_outputs=[
+            "src/components/task-list.html",
+            "tests/t5-renderer.test.js",
+            "dist/tests/t5-ui",
+        ],
+        allowed_paths=["src/index.js", "dist/tests/t5-ui"])
+    proposed["acceptance_criteria"] = ["conductor invented criterion"]
+    proposed["deterministic_checks"] = ["conductor invented command"]
+
+    stable = contract_mod.canonicalize_work_order(task, proposed)
+    compiled = contract_mod.build_task_contract(
+        task, stable, "ollama-pilot", "r-stable")
+
+    assert stable["expected_outputs"] == [
+        "src/components/task-list.html",
+        "tests/t5-renderer.test.js",
+    ]
+    assert stable["acceptance_criteria"] == ["renderer works"]
+    assert stable["deterministic_checks"] == [
+        "node -e \"require('./dist/tests/t5-ui')\""]
+    assert "src/components/task-list.html" in stable["allowed_paths"]
+    assert "tests/t5-renderer.test.js" in stable["allowed_paths"]
+    assert contract_mod.find_work_order_divergences(compiled) == []
+
+
+def test_stable_projection_maps_json_member_to_writable_document():
+    task = simple_task(
+        "t9-test-suite-setup",
+        expected_paths=[{
+            "path": "package.json#scripts.test",
+            "type": "file",
+            "required": True,
+        }])
+    stable = contract_mod.canonicalize_work_order(
+        task, _live_order(allowed_paths=[]))
+
+    assert stable["expected_outputs"] == ["package.json#scripts.test"]
+    assert stable["allowed_paths"] == ["package.json"]
+
+
+def test_stable_authority_recovery_resets_conductor_expansion_blocker(
+        sandbox):
+    project_cfg(sandbox)
+    task = simple_task(
+        "t5-task-list-renderer",
+        expected_paths=[{
+            "path": "tests/t5-renderer.test.js",
+            "type": "file",
+            "required": True,
+        }])
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = ("preflight platform_invalid: work-order expected output "
+              "'dist/tests/t5-ui' is not present in the compiled task "
+              "contract's required_outputs")
+    projstate.update_task(agentic_dir, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason,
+        code=projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+        human_only=False)
+
+    proposed = _live_order(
+        expected_outputs=[
+            "tests/t5-renderer.test.js", "dist/tests/t5-ui"],
+        allowed_paths=["tests/t5-renderer.test.js", "dist/tests/t5-ui"])
+    compiled = contract_mod.build_task_contract(
+        task, proposed, "ollama-pilot", "r-expand")
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r-expand"
+    run_dir.mkdir(parents=True)
+    (run_dir / "task-contract.json").write_text(
+        json.dumps(compiled), encoding="utf-8")
+
+    events = contract_recovery.recover_stable_contract_authority_blockers(
+        agentic_dir, str(sandbox["agentic"] / "memory"), sandbox["cfg"])
+
+    current = {item["id"]: item for item in
+               projstate.load_backlog(agentic_dir)}
+    assert current[task["id"]]["status"] == "pending"
+    assert current[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(agentic_dir) == []
+    assert events[0]["action"] == "reset_conductor_contract_expansion"
+    assert events[0]["discarded_conductor_outputs"] == [
+        "tests/t5-renderer.test.js", "dist/tests/t5-ui"]
