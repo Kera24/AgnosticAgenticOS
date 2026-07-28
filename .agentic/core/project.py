@@ -25,7 +25,7 @@ from . import supervisor as supervisor_mod
 from . import errors, gate, gitops, logs, notify, projstate
 from .breaker import BreakerBoard
 from .orchestrator import (apply_edits, load_prompt, _schema, _snapshot)
-from .redact import looks_like_secret, redact
+from .redact import looks_like_secret_in_diff, redact
 from .scheduler import Scheduler
 
 SECURITY_PATH_TRIGGERS = [
@@ -1198,7 +1198,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                         % (sec_out or {}).get("reason", sec_verdict)[:200])
 
     # cycle commit + integration into agentic/project ------------------------------
-    if looks_like_secret(diff):
+    if looks_like_secret_in_diff(diff):
         _revert_worktree(worktree)
         return fail("failure", "diff appears to contain a secret", block=True,
                     blocking_reason="possible secret in diff")
@@ -1573,7 +1573,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     diff_all = gitops.run_git(["log", "-p", "--max-count=50",
                                PROJECT_BRANCH, "--", "."],
                               cwd=worktree, check=False)
-    checks["no_committed_secrets"] = not looks_like_secret(diff_all)
+    checks["no_committed_secrets"] = not looks_like_secret_in_diff(diff_all)
     checks["env_example_present"] = (
         not _needs_env(worktree) or
         os.path.exists(os.path.join(worktree, ".env.example")))
