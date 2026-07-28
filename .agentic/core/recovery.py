@@ -364,6 +364,51 @@ def recover_whole_diff_secret_scan_blocker(agentic_dir):
     return events
 
 
+
+# -- stale task-branch integration conflict ----------------------------------
+
+def recover_stale_task_integration_blocker(agentic_dir, root, scheduler):
+    """Archive a stale passing task branch and prepare a clean-base retry."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    prefix = "merge conflict integrating task "
+    for task in projstate.load_backlog(agentic_dir):
+        reason = (task.get("blocking_reason") or "").strip()
+        if task.get("status") != "blocked" or not reason.startswith(prefix):
+            continue
+        evidence_id = scheduler.state.get("current_cycle") or "recovery"
+        archived = taskspace.archive_and_reset_task_worktree(
+            root, agentic_dir, task["id"], evidence_id)
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not (blocker.get("reason") or "").strip().startswith(prefix):
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "stale_task_worktree_ancestry",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": archived["archived_branch"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "archive_stale_task_branch_and_retry",
+            "resolved_blockers": resolved,
+            "evidence_ref": archived["archived_branch"],
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
 # -- 6. task-state reconciliation -----------------------------------------------
 
 def _task_state_reconciliation(agentic_dir):
@@ -419,6 +464,9 @@ def _is_legacy_platform_cycle_detail(detail_text):
     if _is_windows_codex_readonly_detail(text):
         return True
     if _QA_MISSING_TASK_GATE_RE.search(text):
+        return True
+    if text.startswith(
+            "integration failed: merge conflict integrating task "):
         return True
     return False
 
@@ -530,6 +578,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     task_gate_events = recover_missing_task_gate_blocker(
         agentic_dir, cfg, memory_dir)
     secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
+    integration_events = recover_stale_task_integration_blocker(
+        agentic_dir, root, scheduler)
     migrated = list(bootstrap_gate.recover_bootstrap_deadlock(agentic_dir))
     migrated += list(bootstrap_gate.recover_expected_paths_contract_bug(
         agentic_dir))
@@ -569,7 +619,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
         contract_events + windows_codex_events + windows_command_events +
-        task_gate_events + secret_scan_events)
+        task_gate_events + secret_scan_events + integration_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
