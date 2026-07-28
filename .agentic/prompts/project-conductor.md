@@ -27,7 +27,11 @@ bounded, machine-verifiable work order a coder can finish within one cycle.
    may emit `contract_amendments` proposals. Each proposal must have a stable
    id, one allowed kind, a value, and a concrete reason. A proposal is never
    approval: platform code independently accepts or rejects it against the
-   backlog policy. Without that enabled policy, omit `contract_amendments`.
+   backlog policy. The supplied `feature_gates.contract_amendments`
+   decision controls rollout: omit proposals when disabled; in shadow mode,
+   emit eligible proposals for evidence but expect no scope change; canary and
+   stable modes may apply proposals only when platform policy accepts them.
+   Without an enabled backlog policy, always omit `contract_amendments`.
 4. `spec` must be self-contained: the coder sees only your work order and the
    workspace.
 5. `done_when` must combine the task's deterministic checks and acceptance
