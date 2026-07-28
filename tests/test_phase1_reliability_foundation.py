@@ -167,15 +167,17 @@ def test_preflight_feasible_for_coverable_contract(tmp_path):
     assert result["consumes_capacity"] is True
 
 
-def test_preflight_platform_invalid_for_impossible_output(tmp_path):
+def test_preflight_repairs_required_output_write_scope(tmp_path):
     task = simple_task(expected_paths=[{"path": "src/index.js",
                                         "type": "file", "required": True}])
     order = proj_order(task, allowed_paths=["docs/**"])
-    c = contract_mod.build_task_contract(task, order, "p")
-    result = preflight_mod.run_preflight(c, task, [task], str(tmp_path),
-                                         str(tmp_path))
-    assert result["result"] == preflight_mod.RESULT_PLATFORM_INVALID
-    assert result["consumes_capacity"] is False
+    compiled = contract_mod.build_task_contract(task, order, "p")
+
+    assert "src/index.js" in compiled["allowed_paths"]
+    result = preflight_mod.run_preflight(
+        compiled, task, [task], str(tmp_path), str(tmp_path))
+    assert result["result"] == preflight_mod.RESULT_FEASIBLE
+    assert result["consumes_capacity"] is True
 
 
 def test_preflight_dependency_wait_for_incomplete_dependency(tmp_path):
