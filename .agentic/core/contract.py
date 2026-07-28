@@ -168,12 +168,50 @@ def find_work_order_divergences(contract):
                         if isinstance(e, dict) and e.get("path")}
     problems = []
     for raw in contract.get("work_order_expected_outputs") or []:
-        entry = bootstrap_gate.normalize_expected_entry(raw)
-        if not _covered_by_required_output(entry["path"], required_outputs,
+        # Typed entries and plain path strings retain the strict historical
+        # comparison. Conductor output is also allowed to be explanatory
+        # prose, however, so compare filesystem tokens inside that prose
+        # instead of treating the entire sentence as a literal path.
+        if isinstance(raw, dict) or (
+                isinstance(raw, str) and
+                not re.search(r"[\\s\x60]", raw.strip())):
+            tokens = [bootstrap_gate.normalize_expected_entry(raw)["path"]]
+        else:
+            text = str(raw or "")
+            tokens = re.findall(r"\x60([^\x60]+)\x60", text)
+            if not tokens:
+                tokens = _PATH_LIKE_RE.findall(text)
+            tokens = [t.strip().rstrip(".,;:)") for t in tokens if t.strip()]
+
+        uncovered = []
+        text = str(raw or "")
+        for token in tokens:
+            if _covered_by_required_output(token, required_outputs,
                                            required_by_path):
+                continue
+            # A JSON-member output such as package.json#scripts.test is a
+            # single canonical filesystem requirement. A prose work order
+            # naturally names its file and member separately; accept that
+            # pair only when BOTH parts are present in the same declaration.
+            fragment_covered = False
+            for required in required_outputs:
+                path = required.get("path", "")
+                if "#" not in path:
+                    continue
+                base, fragment = path.split("#", 1)
+                if base in text and fragment in text and token in (
+                        base, fragment):
+                    fragment_covered = True
+                    break
+            if not fragment_covered:
+                uncovered.append(token)
+
+        if not tokens:
+            uncovered = [str(raw)]
+        for token in uncovered:
             problems.append(
                 "work-order expected output %r is not present in the "
-                "compiled task contract's required_outputs" % entry["path"])
+                "compiled task contract's required_outputs" % token)
     return problems
 
 
