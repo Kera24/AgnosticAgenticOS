@@ -71,7 +71,11 @@ def test_codex_command_construction():
     for role in ("architect", "conductor", "qa", "security"):
         argv = backend.build_argv(role, "read", "C:/ws")
         assert argv[argv.index("--sandbox") + 1] == "read-only"
-    # write permission alone is not enough — role must be the coder
+    # Specialist implementation roles receive the same bounded
+    # workspace-write sandbox as coder when the caller explicitly requests
+    # write; reviewer roles remain read-only even if miscalled with write.
+    argv = backend.build_argv("ui_designer", "write", "C:/ws")
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
     argv = backend.build_argv("qa", "write", "C:/ws")
     assert argv[argv.index("--sandbox") + 1] == "read-only"
 
