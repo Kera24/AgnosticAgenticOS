@@ -174,11 +174,11 @@ def find_work_order_divergences(contract):
         # instead of treating the entire sentence as a literal path.
         if isinstance(raw, dict) or (
                 isinstance(raw, str) and
-                not re.search(r"[\\s\x60]", raw.strip())):
+                not re.search(r"[\s`]", raw.strip())):
             tokens = [bootstrap_gate.normalize_expected_entry(raw)["path"]]
         else:
             text = str(raw or "")
-            tokens = re.findall(r"\x60([^\x60]+)\x60", text)
+            tokens = re.findall(r"`([^`]+)`", text)
             if not tokens:
                 tokens = _PATH_LIKE_RE.findall(text)
             tokens = [t.strip().rstrip(".,;:)") for t in tokens if t.strip()]
