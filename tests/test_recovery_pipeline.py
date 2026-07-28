@@ -476,3 +476,61 @@ def test_recovery_retries_legacy_whole_diff_secret_scan_blocker(sandbox):
         event.get("action") == "reset_whole_diff_secret_scan_blocker"
         and event.get("task_id") == task["id"]
         for event in events)
+
+
+
+def test_recovery_archives_stale_task_branch_after_merge_conflict(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task = simple_task("t5-task-list-renderer")
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = (
+        "merge conflict integrating task t5-task-list-renderer; "
+        "task worktree preserved as evidence")
+    projstate.update_task(
+        agentic_dir, task["id"], status="blocked",
+        blocking_reason=reason, last_result="failure", attempts=1)
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason, code=None, human_only=False)
+    scheduler = _scheduler(sandbox)
+    scheduler.state["current_cycle"] = "run-merge"
+    scheduler.save()
+    calls = []
+
+    def archive(root, runtime_dir, task_id, evidence_id):
+        calls.append((root, runtime_dir, task_id, evidence_id))
+        return {
+            "archived_branch":
+                "agentic/evidence/t5-task-list-renderer-run-merge",
+            "removed": "old-worktree",
+        }
+
+    monkeypatch.setattr(
+        recovery.taskspace, "archive_and_reset_task_worktree", archive)
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], agentic_dir, str(sandbox["repo"]),
+        scheduler, Clock(), log=lambda event: None)
+
+    assert calls and calls[0][2:] == (
+        task["id"], "run-merge")
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["status"] == "pending"
+    assert restored[task["id"]]["blocking_reason"] is None
+    assert restored[task["id"]]["attempts"] == 0
+    assert projstate.open_blockers(agentic_dir) == []
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    event = next(
+        item for item in events
+        if item.get("action") == "archive_stale_task_branch_and_retry")
+    assert event["evidence_ref"] == (
+        "agentic/evidence/t5-task-list-renderer-run-merge")
+
+
+def test_merge_conflict_cycle_is_platform_failure_for_streak_recovery():
+    detail = (
+        "integration failed: merge conflict integrating task "
+        "t5-task-list-renderer; task worktree preserved as evidence")
+    assert recovery._is_legacy_platform_cycle_detail(detail)
