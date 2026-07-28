@@ -95,21 +95,22 @@ def test_live_divergence_fails_preflight_as_platform_invalid(tmp_path):
     assert names["work_order_matches_compiled_contract"]["ok"] is False
 
 
-def test_live_divergence_blocks_before_any_backend_invocation(sandbox):
-    project_cfg(sandbox)
+def test_live_divergence_is_projected_onto_canonical_contract():
     task = _live_task()
-    seed_project(sandbox, [task])
-    caller = FakeCaller({"conductor": _live_order()})
-    result = run_cycle(sandbox["cfg"], caller=caller, clock=Clock())
-    assert result["status"] == "failure"
-    coder_calls = [c for c in caller.calls if c["role"] == "coder"]
-    assert coder_calls == []   # never dispatched -- preflight short-circuited
-    a = str(sandbox["agentic"])
-    blockers = projstate.open_blockers(a)
-    assert blockers
-    assert blockers[0]["code"] == \
-        projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH
-    assert blockers[0]["failure_class"] == "task_contract_invalid"
+    proposed = _live_order()
+    stable = contract_mod.canonicalize_work_order(task, proposed)
+    compiled = contract_mod.build_task_contract(
+        task, stable, "ollama-pilot")
+
+    canonical_paths = {
+        entry["path"] for entry in compiled["required_outputs"]}
+    assert canonical_paths == {"package.json", "index.html", "src"}
+    assert stable["expected_outputs"] == [
+        "package.json", "index.html", "src"]
+    assert ".gitignore" not in stable["expected_outputs"]
+    assert "src/index.js" not in stable["expected_outputs"]
+    assert "tests/" not in stable["expected_outputs"]
+    assert contract_mod.find_work_order_divergences(compiled) == []
 
 
 # -- migration: item 1's six typed required outputs, item 8's exact fix -------
