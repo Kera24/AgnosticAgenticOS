@@ -134,5 +134,7 @@ class FeatureGateRegistry:
         self._save()
         return self.decision(name)
 
-    def status(self, name):
-        return dict(self._record(name), **self.decision(name))
+    def status(self, name, project_id=None):
+        return dict(
+            self._record(name),
+            **self.decision(name, project_id=project_id))
