@@ -286,6 +286,9 @@ def contract_hash(contract):
         "allowed_paths": sorted(contract.get("allowed_paths") or []),
         "prohibited_paths": sorted(contract.get("prohibited_paths") or []),
         "acceptance_criteria": contract.get("acceptance_criteria") or [],
+        "deterministic_checks": contract.get("deterministic_checks") or [],
+        "contract_amendment_decisions":
+            contract.get("contract_amendment_decisions") or [],
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
