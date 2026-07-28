@@ -53,3 +53,26 @@ def test_diff_header_is_not_treated_as_added_content():
         "+enabled = True\n"
     )
     assert looks_like_secret_in_diff(patch) is False
+
+
+
+def test_task_list_identifier_is_not_an_openai_key():
+    patch = (
+        "diff --git a/ui.html b/ui.html\n"
+        "--- a/ui.html\n"
+        "+++ b/ui.html\n"
+        "@@ -0,0 +1 @@\n"
+        "+<section id='task-list-renderer-container'></section>\n"
+    )
+    assert looks_like_secret_in_diff(patch) is False
+
+
+def test_embedded_sk_substring_is_not_a_credential():
+    patch = (
+        "diff --git a/app.js b/app.js\n"
+        "--- a/app.js\n"
+        "+++ b/app.js\n"
+        "@@ -0,0 +1 @@\n"
+        "+const name = 'prefixsk-" + ("A" * 20) + "';\n"
+    )
+    assert looks_like_secret_in_diff(patch) is False
