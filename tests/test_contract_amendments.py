@@ -1,6 +1,11 @@
 """Phase 2: controlled, backlog-authorized contract amendments."""
-from conftest import simple_task
+import json
+import os
+
+from conftest import (Clock, FakeCaller, project_cfg, proj_order, seed_project,
+                      simple_task, verifier_out, worker_out)
 from core import contract
+from core.project import run_cycle
 
 
 def _order(amendments):
@@ -163,3 +168,77 @@ def test_approved_amendment_changes_contract_identity():
         enabled_task, proposal, "project", "amended")
 
     assert contract.contract_hash(base) != contract.contract_hash(amended)
+
+
+
+def test_authorized_amendment_flows_through_complete_cycle(sandbox):
+    cfg = project_cfg(sandbox)
+    cfg["verification"]["commands"] = [{
+        "name": "safe-pass",
+        "command": "python -c \"import sys; sys.exit(0)\"",
+        "mandatory": True,
+    }]
+    task = simple_task(
+        "t-amend",
+        expected_paths=[{
+            "path": "src/base.py", "type": "file",
+            "required": True, "non_empty": True,
+        }],
+        acceptance_criteria=["base output exists"],
+        deterministic_checks=[],
+        contract_amendment_policy={
+            "enabled": True,
+            "allowed_kinds": ["required_output"],
+            "allowed_paths": ["generated/**"],
+        })
+    seed_project(sandbox, [task])
+
+    order = proj_order(task, allowed_paths=["src/base.py"])
+    order["contract_amendments"] = [
+        _proposal(
+            "required_output",
+            {"path": "generated/report.json", "type": "file",
+             "required": True, "non_empty": True},
+            "approved-report", "tool requires a generated report"),
+        _proposal(
+            "required_output", ".env",
+            "rejected-env", "model requests an unauthorized file"),
+    ]
+    caller = FakeCaller({
+        "conductor": order,
+        "coder": worker_out(edits=[
+            {"path": "src/base.py", "action": "write",
+             "content": "VALUE = 1\n"},
+            {"path": "generated/report.json", "action": "write",
+             "content": "{\"ok\": true}\n"},
+        ]),
+        "qa": verifier_out("pass"),
+    })
+
+    result = run_cycle(cfg, caller=caller, clock=Clock())
+
+    assert result["status"] == "success", result
+    run_dir = os.path.join(
+        str(sandbox["agentic"]), "runs", "cycle-" + result["run_id"])
+    with open(os.path.join(run_dir, "contract-amendments.json"),
+              encoding="utf-8") as handle:
+        ledger = json.load(handle)
+    decisions = {item["id"]: item for item in ledger["decisions"]}
+    assert decisions["approved-report"]["accepted"] is True
+    assert decisions["rejected-env"]["accepted"] is False
+    assert decisions["rejected-env"]["decision_code"] == \
+        "path_not_authorized"
+
+    with open(os.path.join(run_dir, "task-contract.json"),
+              encoding="utf-8") as handle:
+        compiled = json.load(handle)
+    required = {item["path"] for item in compiled["required_outputs"]}
+    assert required == {"src/base.py", "generated/report.json"}
+    assert compiled["contract_authority"] == \
+        "backlog+approved_amendments"
+
+    project_worktree = os.path.join(
+        str(sandbox["agentic"]), "worktrees", "project")
+    assert os.path.exists(os.path.join(
+        project_worktree, "generated", "report.json"))
+    assert not os.path.exists(os.path.join(project_worktree, ".env"))
