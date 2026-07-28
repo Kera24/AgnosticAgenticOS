@@ -150,3 +150,16 @@ def test_registry_evidence_persists_across_instances(tmp_path):
     with open(second.path, encoding="utf-8") as handle:
         persisted = json.load(handle)
     assert persisted["runs"]["run-1"]["outcome_recorded"] is True
+
+
+
+def test_status_preserves_project_scope(tmp_path):
+    registry = FeatureGateRegistry(
+        tmp_path, _cfg("canary", ["project-a"]))
+
+    status = registry.status(
+        "contract_amendments", project_id="project-a")
+
+    assert status["project_id"] == "project-a"
+    assert status["canary_selected"] is True
+    assert status["active"] is True
