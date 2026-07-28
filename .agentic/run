@@ -1413,7 +1413,9 @@ def cmd_features(cfg, args):
             {"contract_amendments"}))
         _print({
             "project": project_id,
-            "features": {name: gates.status(name) for name in names},
+            "features": {
+                name: gates.status(name, project_id=project_id)
+                for name in names},
         })
         return 0
     if action == "promote":
@@ -1437,7 +1439,8 @@ def cmd_features(cfg, args):
             "feature": feature,
             "promoted_to": target,
             "decision": decision,
-            "evidence": gates.status(feature),
+            "evidence": gates.status(
+                feature, project_id=project_id),
         })
         return 0
     print("unknown features action %r" % action, file=sys.stderr)
