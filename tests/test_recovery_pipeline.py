@@ -403,3 +403,46 @@ def test_set_override_is_in_memory_only_never_touches_config_files():
     assert cfg["parallelism"]["max_agents_global"] == 1
     after = config_path.read_bytes()
     assert before == after   # never persisted to disk
+
+
+def test_recovery_resets_blocker_when_artifacts_prove_task_gate_omitted(
+        sandbox):
+    project_cfg(sandbox)
+    task = simple_task("t5-task-list-renderer")
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = ("QA: behavior passed, but the required deterministic UI gate "
+              "is not evidenced in the supplied check results")
+    projstate.update_task(agentic_dir, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(agentic_dir, task["id"], reason, code=None,
+                          human_only=False)
+
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r5"
+    run_dir.mkdir(parents=True)
+    (run_dir / "task-contract.json").write_text(json.dumps({
+        "task_id": task["id"],
+        "run_id": "r5",
+        "deterministic_checks": [
+            "node -e \"require('./dist/tests/t5-ui')\""],
+    }), encoding="utf-8")
+    (run_dir / "validation-result-1.json").write_text(json.dumps({
+        "ok": True,
+        "results": [{
+            "name": "pytest",
+            "command": "python -m pytest -q",
+            "passed": True,
+        }],
+    }), encoding="utf-8")
+
+    events = recovery.recover_missing_task_gate_blocker(
+        agentic_dir, sandbox["cfg"],
+        str(sandbox["agentic"] / "memory"))
+
+    current = {t["id"]: t for t in projstate.load_backlog(agentic_dir)}
+    assert current[task["id"]]["status"] == "pending"
+    assert current[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(agentic_dir) == []
+    assert events[0]["run_id"] == "r5"
+    assert events[0]["missing_commands"] == [
+        "node -e \"require('./dist/tests/t5-ui')\""]
