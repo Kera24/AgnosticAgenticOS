@@ -197,7 +197,10 @@ def build_task_contract(task, order, project_id, run_id=None,
     the structural gate itself uses, so the contract's acceptance
     contract and the gate's evaluation of it can never drift apart."""
     task = task or {}
-    order = canonicalize_work_order(task, order or {})
+    proposed_order = copy.deepcopy(order or {})
+    proposed_expected_outputs = list(
+        proposed_order.get("expected_outputs") or [])
+    order = canonicalize_work_order(task, proposed_order)
     required_outputs = [bootstrap_gate.normalize_expected_entry(e)
                         for e in task.get("expected_paths") or []]
     required_paths = {entry["path"] for entry in required_outputs}
@@ -243,8 +246,7 @@ def build_task_contract(task, order, project_id, run_id=None,
         # `required_outputs`: the backlog task's typed expected_paths stay
         # the single canonical source the conductor's work order must stay
         # within, never a place the conductor can unilaterally expand.
-        "work_order_expected_outputs": list(order.get("expected_outputs")
-                                           or []),
+        "work_order_expected_outputs": proposed_expected_outputs,
         "contract_authority": order.get("contract_authority"),
         "contract_amendment_decisions": copy.deepcopy(
             order.get("contract_amendment_decisions") or []),
