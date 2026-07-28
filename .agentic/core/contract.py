@@ -197,9 +197,18 @@ def build_task_contract(task, order, project_id, run_id=None,
     the structural gate itself uses, so the contract's acceptance
     contract and the gate's evaluation of it can never drift apart."""
     task = task or {}
-    order = order or {}
+    order = canonicalize_work_order(task, order or {})
     required_outputs = [bootstrap_gate.normalize_expected_entry(e)
                         for e in task.get("expected_paths") or []]
+    required_paths = {entry["path"] for entry in required_outputs}
+    for decision in order.get("contract_amendment_decisions") or []:
+        if not decision.get("accepted") or \
+                decision.get("kind") != "required_output":
+            continue
+        entry = decision.get("normalized_value")
+        if isinstance(entry, dict) and entry.get("path") not in required_paths:
+            required_outputs.append(copy.deepcopy(entry))
+            required_paths.add(entry["path"])
     security_relevant = bool(task.get("security_relevant"))
     evidence = ["deterministic_or_structural_gate_pass", "independent_qa_pass"]
     if security_relevant:
@@ -221,9 +230,8 @@ def build_task_contract(task, order, project_id, run_id=None,
             "maximum_changed_lines": order.get("maximum_changed_lines"),
             "expected_size": task.get("expected_size") or "medium",
         },
-        "deterministic_checks": list(task.get("deterministic_checks") or []),
-        "acceptance_criteria": list(task.get("acceptance_criteria")
-                                    or order.get("acceptance_criteria") or []),
+        "deterministic_checks": list(order.get("deterministic_checks") or []),
+        "acceptance_criteria": list(order.get("acceptance_criteria") or []),
         "decision_classifications": list(decision_classifications or []),
         "risk": order.get("risk") or task.get("risk") or "medium",
         "rollback_strategy": "revert_task_worktree_and_retry",
@@ -237,6 +245,9 @@ def build_task_contract(task, order, project_id, run_id=None,
         # within, never a place the conductor can unilaterally expand.
         "work_order_expected_outputs": list(order.get("expected_outputs")
                                            or []),
+        "contract_authority": order.get("contract_authority"),
+        "contract_amendment_decisions": copy.deepcopy(
+            order.get("contract_amendment_decisions") or []),
         "built_at": _dt.datetime.now().isoformat(timespec="seconds"),
     }
 
