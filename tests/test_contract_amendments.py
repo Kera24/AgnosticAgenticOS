@@ -5,6 +5,7 @@ import os
 from conftest import (Clock, FakeCaller, project_cfg, proj_order, seed_project,
                       simple_task, verifier_out, worker_out)
 from core import contract
+from core.featuregates import FeatureGateRegistry
 from core.project import run_cycle
 
 
@@ -224,6 +225,11 @@ def test_authorized_amendment_flows_through_complete_cycle(sandbox):
     result = run_cycle(cfg, caller=caller, clock=Clock())
 
     assert result["status"] == "success", result
+    feature_status = FeatureGateRegistry(
+        str(sandbox["agentic"] / "memory"), cfg).status(
+            "contract_amendments")
+    assert feature_status["successes"] == 1
+    assert feature_status["effective_state"] == "canary"
     run_dir = os.path.join(
         str(sandbox["agentic"]), "runs", "cycle-" + result["run_id"])
     with open(os.path.join(run_dir, "contract-amendments.json"),
