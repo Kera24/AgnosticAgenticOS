@@ -51,8 +51,9 @@ def _stale_lease_recovery(agentic_dir, cfg, clock):
 # -- fixed native-Windows Codex sandbox blocker -------------------------------
 
 _WINDOWS_CODEX_READ_ONLY_RE = re.compile(
-    r"^Workspace is read-only, so the required scaffold files and "
-    r"directories cannot be created\.?$", re.I)
+    r"^(?:Workspace is read-only, so the required scaffold files and "
+    r"directories cannot be created|Workspace filesystem is read-only, "
+    r"so required edits(?:\\s+.*?)?\\s+cannot be made)\\.?$", re.I)
 
 
 def _is_native_windows():
