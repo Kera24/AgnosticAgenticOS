@@ -9,7 +9,8 @@ from conftest import (Clock, FakeCaller, project_cfg, proj_order,
                       seed_project, simple_task, verifier_out, worker_out)
 from core import errors, gitops, projstate, taskspace
 from core.project import run_cycle
-from core.taskspace import (ProjectLease, active_claims, claim_paths,
+from core.taskspace import (ProjectLease, active_claims,
+                            archive_and_reset_task_worktree, claim_paths,
                             cleanup_task_worktree, create_task_worktree,
                             integrate_task, recover_abandoned,
                             release_claim)
@@ -229,3 +230,38 @@ def test_failed_cycle_keeps_task_worktree_evidence(sandbox):
     a = str(sandbox["agentic"])
     assert os.path.exists(os.path.join(a, "worktrees", "tasks", "t1-first"))
     assert active_claims(a) == {}          # claim released, evidence kept
+
+
+
+def test_archive_and_reset_stale_task_worktree_preserves_evidence(sandbox):
+    repo = str(sandbox["repo"])
+    agentic_dir = str(sandbox["agentic"])
+    project_wt = os.path.join(agentic_dir, "worktrees", "project")
+    gitops.run_git(
+        ["worktree", "add", "-b", "agentic/project", project_wt, "HEAD"],
+        cwd=repo)
+    task_wt = create_task_worktree(
+        repo, agentic_dir, "t5-task-list-renderer", "agentic/project")
+    with open(os.path.join(task_wt, "task-evidence.txt"), "w",
+              encoding="utf-8") as handle:
+        handle.write("reviewed work\n")
+    gitops.commit_all(task_wt, "reviewed task work")
+    claim_paths(agentic_dir, "t5-task-list-renderer", ["task-evidence.txt"])
+
+    result = archive_and_reset_task_worktree(
+        repo, agentic_dir, "t5-task-list-renderer", "run-123")
+
+    assert not os.path.exists(task_wt)
+    assert active_claims(agentic_dir) == {}
+    assert gitops.run_git(
+        ["branch", "--list", "agentic/task/t5-task-list-renderer"],
+        cwd=repo, check=False).strip() == ""
+    evidence = result["archived_branch"]
+    assert evidence == (
+        "agentic/evidence/t5-task-list-renderer-run-123")
+    assert gitops.run_git(
+        ["branch", "--list", evidence], cwd=repo,
+        check=False).strip()
+    content = gitops.run_git(
+        ["show", evidence + ":task-evidence.txt"], cwd=repo)
+    assert content == "reviewed work\n"
