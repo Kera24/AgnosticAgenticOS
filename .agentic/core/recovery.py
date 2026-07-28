@@ -318,6 +318,52 @@ def recover_missing_task_gate_blocker(agentic_dir, cfg, memory_dir):
     return events
 
 
+
+# -- fixed whole-diff secret-scan blocker ------------------------------------
+
+def recover_whole_diff_secret_scan_blocker(agentic_dir):
+    """Retry blockers produced by the legacy whole-patch secret scanner.
+
+    The failed diff was reverted before this state was recorded. Retrying is
+    safe because the replacement scanner still rejects every credential-shaped
+    value on an added line; only removed/context lines cease to block work.
+    """
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or \
+                (task.get("blocking_reason") or "").strip() != \
+                "possible secret in diff":
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if (blocker.get("reason") or "").strip() != \
+                    "possible secret in diff":
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "legacy_whole_diff_secret_scan",
+                "platform_owned": True,
+                "retryable": True,
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_whole_diff_secret_scan_blocker",
+            "resolved_blockers": resolved,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
 # -- 6. task-state reconciliation -----------------------------------------------
 
 def _task_state_reconciliation(agentic_dir):
@@ -483,6 +529,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     memory_dir = os.path.join(str(agentic_dir), "memory")
     task_gate_events = recover_missing_task_gate_blocker(
         agentic_dir, cfg, memory_dir)
+    secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
     migrated = list(bootstrap_gate.recover_bootstrap_deadlock(agentic_dir))
     migrated += list(bootstrap_gate.recover_expected_paths_contract_bug(
         agentic_dir))
@@ -522,7 +569,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
         contract_events + windows_codex_events + windows_command_events +
-        task_gate_events)
+        task_gate_events + secret_scan_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
