@@ -44,7 +44,7 @@ def test_required_task_fallback_chain_never_uses_shell(
 
     monkeypatch.setattr(gate.execpolicy, "run_command", fake_run)
     result = gate.run_checks(
-        {"verification": {"commands": []}},
+        {"verification": {"commands": "auto"}},
         str(tmp_path),
         required_commands=["npm test || npx vitest --run"])
 
@@ -52,3 +52,24 @@ def test_required_task_fallback_chain_never_uses_shell(
     assert calls == [("npm test", False), ("npx vitest --run", False)]
     assert result["results"][0]["attempted_alternatives"] == [
         ["npm test"], ["npx vitest --run"]]
+
+
+def test_explicit_admin_checks_remain_authoritative(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return _result([command])
+
+    monkeypatch.setattr(gate.execpolicy, "run_command", fake_run)
+    result = gate.run_checks(
+        {"verification": {"commands": [{
+            "name": "offline-substitute",
+            "command": "python -c \"print('safe')\"",
+            "mandatory": True,
+        }]}},
+        str(tmp_path),
+        required_commands=["npm run build"])
+
+    assert result["ok"] is True
+    assert calls == ["python -c \"print('safe')\""]
