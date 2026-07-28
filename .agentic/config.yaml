@@ -31,6 +31,16 @@ execution:
   preferred_engine: native
   fallback_engine: native
 
+# Advanced capabilities graduate through disabled -> shadow -> canary -> stable.
+# Shadow records policy decisions without changing execution. Canary requires
+# an explicit project id and automatically rolls back to shadow after a
+# platform-classified failure. Promotion also requires accumulated successes.
+advanced_features:
+  contract_amendments:
+    state: shadow
+    canary_projects: []
+    promotion_min_successes: 3
+
 # Optional external execution-engine adapter (core/execengine.py). Never
 # required: AgenticOS remains fully functional with orca.enabled: false
 # (the shipped default). AgenticOS stays authoritative for task
