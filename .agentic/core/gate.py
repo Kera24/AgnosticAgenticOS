@@ -131,7 +131,8 @@ def save_baseline(agentic_dir, results):
     return data
 
 
-def run_checks(cfg, workdir, log_dir=None, timeout=None):
+def run_checks(cfg, workdir, log_dir=None, timeout=None,
+               required_commands=None):
     """Run every configured check in workdir. Mandatory checks are never
     skipped; a missing log_dir only skips log persistence, not checks.
 
@@ -139,6 +140,28 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
     `no_checks: true`): a repository without deterministic verification can
     never pass the gate, and no AI verdict may convert that into success."""
     commands, auto = resolve_commands(cfg, workdir)
+    commands = list(commands)
+    existing = {str(c.get("command")) for c in commands}
+    for index, raw in enumerate(required_commands or [], 1):
+        check = dict(raw) if isinstance(raw, dict) else {
+            "name": "task-deterministic-%d" % index,
+            "command": str(raw),
+            "mandatory": True,
+            "kind": "test_suite",
+        }
+        command = str(check.get("command") or "")
+        if not command or command in existing:
+            continue
+        # A task contract may express portable fallback semantics as
+        # "first || second". Preserve that meaning without ever enabling a
+        # shell: each alternative is independently parsed and executed by
+        # execpolicy with shell=False.
+        alternatives = [part.strip() for part in command.split(" || ")
+                        if part.strip()]
+        if len(alternatives) > 1:
+            check["alternatives"] = alternatives
+        commands.append(check)
+        existing.add(command)
     if not commands:
         return {"ok": False, "auto_detected": auto, "results": [],
                 "no_checks": True, "tests": "not_configured_yet",
@@ -178,22 +201,37 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
             record["platform_neutral"] = False
             record["skipped_unix_only"] = True
         else:
-            run = execpolicy.run_command(
-                check["command"], cwd=workdir, timeout=timeout,
-                shell_required=bool(check.get("shell_required", False)),
-                source="config")
+            alternatives = check.get("alternatives") or [check["command"]]
+            attempts = []
+            run = None
+            for alternative in alternatives:
+                run = execpolicy.run_command(
+                    alternative, cwd=workdir, timeout=timeout,
+                    shell_required=bool(check.get("shell_required", False)),
+                    source="config")
+                attempts.append(run)
+                if run["exit_code"] == 0 and not run["timed_out"]:
+                    break
             record["exit_code"] = run["exit_code"]
             record["passed"] = run["exit_code"] == 0 and not run["timed_out"]
-            output = run["stdout"] + run["stderr"]
+            output = "\n".join(
+                (attempt["stdout"] + attempt["stderr"]).strip()
+                for attempt in attempts)
             record["detail"] = ("timed out after %ss" % timeout
                                 if run["timed_out"]
                                 else output[-400:].strip())
+            if len(attempts) > 1:
+                record["attempted_alternatives"] = [
+                    attempt["argv"] for attempt in attempts]
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
                 with open(os.path.join(log_dir, name + ".log"), "w",
                           encoding="utf-8", errors="replace") as fh:
-                    fh.write("$ %s\nexit: %s\n\n%s"
-                            % (run["argv"], record["exit_code"], output))
+                    for attempt in attempts:
+                        attempt_output = attempt["stdout"] + attempt["stderr"]
+                        fh.write("$ %s\nexit: %s\n\n%s\n"
+                                 % (attempt["argv"], attempt["exit_code"],
+                                    attempt_output))
         results.append(record)
         if mandatory and not record["passed"]:
             ok = False
