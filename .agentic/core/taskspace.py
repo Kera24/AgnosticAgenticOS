@@ -210,6 +210,30 @@ def cleanup_task_worktree(root, agentic_dir, task_id, success,
     return {"removed": path}
 
 
+
+def archive_and_reset_task_worktree(root, agentic_dir, task_id, evidence_id):
+    """Archive a stale task branch, then remove its worktree for a fresh retry.
+
+    The immutable local evidence branch keeps the reviewed task commit
+    reachable. The normal task branch/worktree is removed so the next cycle
+    is created from the current agentic/project tip rather than stale ancestry.
+    """
+    path = task_worktree_path(agentic_dir, task_id)
+    branch = TASK_BRANCH_PREFIX + task_id
+    safe_id = "".join(
+        char if char.isalnum() or char in ("-", "_") else "-"
+        for char in str(evidence_id or "recovery"))
+    evidence_branch = "agentic/evidence/%s-%s" % (task_id, safe_id)
+    if _branch_exists(root, branch):
+        if not _branch_exists(root, evidence_branch):
+            gitops.run_git(["branch", evidence_branch, branch], cwd=root)
+    gitops.run_git(["worktree", "remove", "--force", path], cwd=root,
+                   check=False)
+    gitops.run_git(["branch", "-D", branch], cwd=root, check=False)
+    release_claim(agentic_dir, task_id)
+    return {"archived_branch": evidence_branch, "removed": path}
+
+
 def recover_abandoned(root, agentic_dir, clock=None):
     """After a crash/restart: prune git's stale worktree records and report
     task worktrees without an active claim (older than the abandonment
