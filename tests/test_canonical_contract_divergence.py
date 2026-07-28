@@ -12,6 +12,7 @@ backlog `expected_paths` = [package.json, index.html, {src, directory}];
 work-order `expected_outputs` = [package.json, index.html, .gitignore,
 src/index.js, tests]; `allowed_paths` additionally covers `.gitignore`,
 `src/**/*`, `tests/**/*`."""
+import json
 import os
 
 from conftest import Clock, FakeCaller, git, project_cfg, seed_project, simple_task, worker_out
@@ -394,3 +395,69 @@ def test_unrelated_blocker_never_touched_by_contract_recovery(sandbox):
     assert events == []
     tasks = {t["id"]: t for t in projstate.load_backlog(a)}
     assert tasks["t1-first"]["status"] == "blocked"
+
+
+def test_work_order_prose_outputs_match_typed_glob_and_json_member():
+    task = simple_task(
+        "t9-test-suite-setup",
+        expected_paths=[
+            {"path": "tests/*.test.js", "type": "glob", "required": True},
+            {"path": "package.json#scripts.test", "type": "file",
+             "required": True},
+        ])
+    order = _live_order(expected_outputs=[
+        "Updated `package.json` with `scripts.test`.",
+        "One or more JS tests in `tests/*.test.js` covering CRUD.",
+    ])
+    compiled = contract_mod.build_task_contract(
+        task, order, "ollama-pilot", "20260728-055526")
+
+    assert contract_mod.find_work_order_divergences(compiled) == []
+
+    compiled["work_order_expected_outputs"].append(
+        "Also create `unplanned.config.js`.")
+    assert any("unplanned.config.js" in problem for problem in
+               contract_mod.find_work_order_divergences(compiled))
+
+
+def test_artifact_backed_recovery_clears_only_now_valid_structural_blocker(
+        sandbox):
+    project_cfg(sandbox)
+    task = simple_task(
+        "t9-test-suite-setup",
+        expected_paths=[
+            {"path": "tests/*.test.js", "type": "glob", "required": True},
+            {"path": "package.json#scripts.test", "type": "file",
+             "required": True},
+        ])
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = "preflight platform_invalid: false prose path comparison"
+    projstate.update_task(agentic_dir, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason,
+        code=projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+        human_only=False)
+
+    order = _live_order(expected_outputs=[
+        "Updated `package.json` with `scripts.test`.",
+        "One or more JS tests in `tests/*.test.js` covering CRUD.",
+    ])
+    compiled = contract_mod.build_task_contract(
+        task, order, "ollama-pilot", "r9")
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r9"
+    run_dir.mkdir(parents=True)
+    (run_dir / "task-contract.json").write_text(
+        json.dumps(compiled), encoding="utf-8")
+
+    events = contract_recovery.recover_fixed_contract_comparison_blockers(
+        agentic_dir, str(sandbox["agentic"] / "memory"), sandbox["cfg"])
+
+    current = {t["id"]: t for t in projstate.load_backlog(agentic_dir)}
+    assert current[task["id"]]["status"] == "pending"
+    assert current[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(agentic_dir) == []
+    assert events[0]["action"] == \
+        "reset_false_structural_contract_mismatch"
+    assert events[0]["run_id"] == "r9"
