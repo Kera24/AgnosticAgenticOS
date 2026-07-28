@@ -446,3 +446,33 @@ def test_recovery_resets_blocker_when_artifacts_prove_task_gate_omitted(
     assert events[0]["run_id"] == "r5"
     assert events[0]["missing_commands"] == [
         "node -e \"require('./dist/tests/t5-ui')\""]
+
+
+
+def test_recovery_retries_legacy_whole_diff_secret_scan_blocker(sandbox):
+    project_cfg(sandbox)
+    task = simple_task("t5-task-list-renderer")
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = "possible secret in diff"
+    projstate.update_task(
+        agentic_dir, task["id"], status="blocked",
+        blocking_reason=reason, last_result="failure", attempts=1)
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason, code=None, human_only=False)
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], agentic_dir, str(sandbox["repo"]),
+        _scheduler(sandbox), Clock(), log=lambda event: None)
+
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["status"] == "pending"
+    assert restored[task["id"]]["blocking_reason"] is None
+    assert restored[task["id"]]["attempts"] == 0
+    assert projstate.open_blockers(agentic_dir) == []
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    assert any(
+        event.get("action") == "reset_whole_diff_secret_scan_blocker"
+        and event.get("task_id") == task["id"]
+        for event in events)
