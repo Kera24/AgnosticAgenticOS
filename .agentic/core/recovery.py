@@ -487,6 +487,90 @@ def recover_stale_filter_source_blocker(agentic_dir, root, scheduler):
     return events
 
 
+# -- fixed platform-neutral documentation read check -------------------------
+
+_REPEATED_IDENTICAL_REASONS = {
+    "repeated identical failure (same diff, same errors)",
+    "repeated identical failure — stopping early",
+}
+
+
+def _unix_cat_skip_evidence(agentic_dir, task_id):
+    pattern = os.path.join(str(agentic_dir), "runs", "cycle-*")
+    for cycle_dir in sorted(glob.glob(pattern), reverse=True):
+        order_path = os.path.join(cycle_dir, "work-order.json")
+        try:
+            with open(order_path, encoding="utf-8") as fh:
+                order = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if (order.get("task_id") or order.get("item")) != task_id:
+            continue
+        for path in sorted(glob.glob(os.path.join(
+                cycle_dir, "validation-result-*.json")), reverse=True):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            for result in validation.get("results") or []:
+                command = str(result.get("command") or "")
+                if result.get("skipped_unix_only") and \
+                        re.match(r"^cat\s+[^\s]+$", command):
+                    return {
+                        "run_id": os.path.basename(cycle_dir).replace(
+                            "cycle-", "", 1),
+                        "evidence_ref": path,
+                        "command": command,
+                    }
+        return None
+    return None
+
+
+def recover_platform_neutral_read_blocker(agentic_dir):
+    """Retry documentation work blocked only because legacy Windows gates
+    could not evaluate the safe read-only `cat RELATIVE_FILE` idiom."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        reason = (task.get("blocking_reason") or "").strip()
+        if task.get("status") != "blocked" or \
+                reason not in _REPEATED_IDENTICAL_REASONS:
+            continue
+        evidence = _unix_cat_skip_evidence(agentic_dir, task["id"])
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if (blocker.get("reason") or "").strip() not in \
+                    _REPEATED_IDENTICAL_REASONS:
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "legacy_unix_only_read_check",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_platform_neutral_read_check_blocker",
+            "resolved_blockers": resolved,
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
 # -- fixed whole-diff secret-scan blocker ------------------------------------
 
 def recover_whole_diff_secret_scan_blocker(agentic_dir):
@@ -750,6 +834,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         evidence_id=scheduler.state.get("current_cycle") or "recovery")
     stale_source_events = recover_stale_filter_source_blocker(
         agentic_dir, root, scheduler)
+    read_check_events = recover_platform_neutral_read_blocker(agentic_dir)
     secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
     integration_events = recover_stale_task_integration_blocker(
         agentic_dir, root, scheduler)
@@ -765,7 +850,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     aggregate_events = parallel_recovery.recover_parallel_candidate_aggregate(
         agentic_dir)
     for event in (windows_command_events + task_gate_events +
-                  qa_evidence_events + stale_source_events):
+                  qa_evidence_events + stale_source_events +
+                  read_check_events):
         action = event.get("action")
         if action == "reset_windows_command_resolution_blocker":
             failure_class = "platform_capability_missing"
@@ -773,6 +859,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
             failure_class = "legacy_qa_evidence_omission"
         elif action == "archive_stale_recovered_task_worktree_and_retry":
             failure_class = "stale_recovered_task_worktree"
+        elif action == "reset_platform_neutral_read_check_blocker":
+            failure_class = "legacy_unix_only_read_check"
         else:
             failure_class = "task_contract_invalid"
         logs.decision(memory_dir, {
@@ -799,7 +887,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         [e for e in aggregate_events if e.get("recovered")] +
         contract_events + windows_codex_events + windows_command_events +
         task_gate_events + qa_evidence_events + stale_source_events +
-        secret_scan_events + integration_events)
+        read_check_events + secret_scan_events + integration_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
