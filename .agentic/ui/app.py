@@ -133,6 +133,11 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         from core import projectops
         return projectops.project_cfg_for(base, registry, record)
 
+    def project_runtime_dir(configuration):
+        """Selected runtime directory with legacy single-project fallback."""
+        runtime = configuration.get("runtime") or {}
+        return str(runtime.get("project_dir") or config_mod.AGENTIC_DIR)
+
     def _select_project(project_id):
         from core.registry import ProjectRegistry, RegistryError
         registry = ProjectRegistry()
@@ -319,11 +324,11 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def project_start_route(body: ProjectStartBody):
         configuration = project_cfg()
         from core import projstate
-        if projstate.exists(configuration["runtime"]["project_dir"]):
+        if projstate.exists(project_runtime_dir(configuration)):
             raise HTTPException(409, "a project already exists; the "
                                      "dashboard never deletes project state")
         text, source = _resolve_plan(body, configuration)
-        plans_dir = os.path.join(configuration["runtime"]["project_dir"],
+        plans_dir = os.path.join(project_runtime_dir(configuration),
                                  "runs", "ui-plans")
         os.makedirs(plans_dir, exist_ok=True)
         plan_path = os.path.join(plans_dir, "plan-%s.md"
