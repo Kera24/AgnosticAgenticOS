@@ -16,10 +16,11 @@ def test_project_review_applies_registered_project_overlay(monkeypatch,
                            "selected-memory"))
     command.__globals__["_overrides"] = lambda args: {}
     observed = {}
-    monkeypatch.setattr(
-        project, "final_audit",
-        lambda cfg, overrides=None: (
-            observed.setdefault("cfg", cfg) or {"status": "complete"}))
+    def fake_final_audit(cfg, overrides=None):
+        observed["cfg"] = cfg
+        return {"status": "complete"}
+
+    monkeypatch.setattr(project, "final_audit", fake_final_audit)
 
     result = command({}, SimpleNamespace(project_id="ollama-pilot"))
 
