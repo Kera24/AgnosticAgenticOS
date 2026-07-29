@@ -218,6 +218,8 @@ def recover_windows_command_resolution_blocker(agentic_dir, cfg):
             "action": "reset_windows_command_resolution_blocker",
             "resolved_blockers": resolved,
             **evidence,
+            **({"archived_branch": archived["archived_branch"]}
+               if archived else {}),
         })
     if events:
         projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
@@ -367,7 +369,8 @@ def _passing_filter_coverage_evidence(agentic_dir, task_id):
     return None
 
 
-def recover_qa_semantic_evidence_blocker(agentic_dir):
+def recover_qa_semantic_evidence_blocker(agentic_dir, root=None,
+                                         evidence_id="recovery"):
     """Reset only the historical filter-coverage rejection caused by QA
     receiving booleans without the already-passing named subtest output."""
     blockers_doc = projstate.read_yaml(
@@ -397,6 +400,12 @@ def recover_qa_semantic_evidence_blocker(agentic_dir):
                 "evidence_ref": evidence["evidence_ref"],
             })
             resolved += 1
+        task_git = os.path.join(
+            str(agentic_dir), "worktrees", "tasks", task["id"], ".git")
+        archived = None
+        if root and os.path.exists(task_git):
+            archived = taskspace.archive_and_reset_task_worktree(
+                root, agentic_dir, task["id"], evidence_id)
         projstate.update_task(
             agentic_dir, task["id"], status="pending",
             blocking_reason=None, last_result=None, attempts=0)
@@ -405,6 +414,75 @@ def recover_qa_semantic_evidence_blocker(agentic_dir):
             "action": "reset_qa_semantic_evidence_blocker",
             "resolved_blockers": resolved,
             **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+# -- stale recovered task source ---------------------------------------------
+
+_STALE_FILTER_SOURCE_RE = re.compile(
+    r"^Required real all/active/completed filter behavior is absent from "
+    r"repository source, and the work order only allows editing ", re.I)
+
+
+def recover_stale_filter_source_blocker(agentic_dir, root, scheduler):
+    """A recovered task worktree may predate a dependency that has since
+    landed on agentic/project. Reset only when the current project source
+    demonstrably contains filter behavior and the task worktree does not."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    project_index = os.path.join(
+        str(agentic_dir), "worktrees", "project", "src", "index.js")
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        reason = (task.get("blocking_reason") or "").strip()
+        if task.get("status") != "blocked" or not \
+                _STALE_FILTER_SOURCE_RE.search(reason):
+            continue
+        task_index = os.path.join(
+            str(agentic_dir), "worktrees", "tasks", task["id"],
+            "src", "index.js")
+        try:
+            with open(project_index, encoding="utf-8") as fh:
+                project_source = fh.read()
+            with open(task_index, encoding="utf-8") as fh:
+                task_source = fh.read()
+        except OSError:
+            continue
+        markers = ("data-task-filter", "activeFilter")
+        if not all(marker in project_source for marker in markers) or \
+                all(marker in task_source for marker in markers):
+            continue
+        evidence_id = scheduler.state.get("current_cycle") or "recovery"
+        archived = taskspace.archive_and_reset_task_worktree(
+            root, agentic_dir, task["id"], evidence_id)
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not _STALE_FILTER_SOURCE_RE.search(
+                    (blocker.get("reason") or "").strip()):
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "stale_recovered_task_worktree",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": archived["archived_branch"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "archive_stale_recovered_task_worktree_and_retry",
+            "resolved_blockers": resolved,
+            "run_id": evidence_id,
+            "evidence_ref": archived["archived_branch"],
         })
     if events:
         projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
@@ -669,7 +747,11 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     memory_dir = os.path.join(str(agentic_dir), "memory")
     task_gate_events = recover_missing_task_gate_blocker(
         agentic_dir, cfg, memory_dir)
-    qa_evidence_events = recover_qa_semantic_evidence_blocker(agentic_dir)
+    qa_evidence_events = recover_qa_semantic_evidence_blocker(
+        agentic_dir, root=root,
+        evidence_id=scheduler.state.get("current_cycle") or "recovery")
+    stale_source_events = recover_stale_filter_source_blocker(
+        agentic_dir, root, scheduler)
     secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
     integration_events = recover_stale_task_integration_blocker(
         agentic_dir, root, scheduler)
@@ -685,12 +767,14 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     aggregate_events = parallel_recovery.recover_parallel_candidate_aggregate(
         agentic_dir)
     for event in (windows_command_events + task_gate_events +
-                  qa_evidence_events):
+                  qa_evidence_events + stale_source_events):
         action = event.get("action")
         if action == "reset_windows_command_resolution_blocker":
             failure_class = "platform_capability_missing"
         elif action == "reset_qa_semantic_evidence_blocker":
             failure_class = "legacy_qa_evidence_omission"
+        elif action == "archive_stale_recovered_task_worktree_and_retry":
+            failure_class = "stale_recovered_task_worktree"
         else:
             failure_class = "task_contract_invalid"
         logs.decision(memory_dir, {
@@ -716,8 +800,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
         contract_events + windows_codex_events + windows_command_events +
-        task_gate_events + qa_evidence_events + secret_scan_events +
-        integration_events)
+        task_gate_events + qa_evidence_events + stale_source_events +
+        secret_scan_events + integration_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
