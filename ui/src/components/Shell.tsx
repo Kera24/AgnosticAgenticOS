@@ -19,7 +19,7 @@ import {
   Waypoints,
   WifiOff,
 } from "lucide-react";
-import { useProject, useSettings } from "../state/queries";
+import { useProject, useProjectSelection, useSettings } from "../state/queries";
 import { schedulerStatus } from "../lib/status";
 import { useLive } from "../state/events";
 import { BackendChip, Countdown, StatusChip, Toasts } from "./ui";
@@ -48,6 +48,7 @@ const NAV = [
 
 export function Shell() {
   const { data: project } = useProject();
+  const { data: selection } = useProjectSelection();
   const { data: settings } = useSettings();
   const { connection } = useLive();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -103,7 +104,7 @@ export function Shell() {
         <span className="strip-item" style={{ minWidth: 0 }}>
           <span className="strip-label">Project</span>
           <span className="strip-project">
-            {project?.exists ? (project.name ?? "unnamed") : "none"}
+            {selection?.project_id ?? "select a project"}
           </span>
         </span>
         <span className="strip-item">
