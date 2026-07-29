@@ -11,6 +11,7 @@ Security model (loopback-only control plane for a code-execution system):
 - every state-changing dashboard action is written to the audit trail.
 """
 import datetime as _dt
+import json
 import os
 import queue as _queue
 import threading
@@ -111,6 +112,44 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
             raise HTTPException(500, "configuration failed to load: %s"
                                 % exc)
 
+    def _selected_record():
+        """Return the explicitly selected registered project, if any."""
+        from core.registry import ProjectRegistry, RegistryError
+        registry = ProjectRegistry()
+        path = os.path.join(registry.home, "ui-selected-project.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                project_id = (json.load(fh) or {}).get("project_id")
+            return registry, registry.get(str(project_id)[:64])
+        except (OSError, ValueError, TypeError, RegistryError):
+            return registry, None
+
+    def project_cfg():
+        """Configuration overlay for the selected registered project."""
+        base = cfg()
+        registry, record = _selected_record()
+        if record is None:
+            return base
+        from core import projectops
+        return projectops.project_cfg_for(base, registry, record)
+
+    def _select_project(project_id):
+        from core.registry import ProjectRegistry, RegistryError
+        registry = ProjectRegistry()
+        try:
+            record = registry.get(project_id[:64])
+        except RegistryError as exc:
+            raise HTTPException(404, str(exc.detail
+                                         if hasattr(exc, "detail")
+                                         else exc))
+        path = os.path.join(registry.home, "ui-selected-project.json")
+        os.makedirs(registry.home, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"project_id": record["id"]}, fh)
+        os.replace(tmp, path)
+        return record
+
     def run_detection(force=False):
         with detection_lock:
             cache = app.state.detection
@@ -194,32 +233,32 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     @app.get(API + "/doctor")
     def doctor():
         from core.doctor import run_doctor
-        ok, checks = run_doctor(cfg=cfg())
+        ok, checks = run_doctor(cfg=project_cfg())
         return {"ok": ok, "checks": [{"level": lv, "message": msg}
                                      for lv, msg in checks]}
 
     # -- project -----------------------------------------------------------------
     @app.get(API + "/project")
     def project():
-        return snapshots.project_snapshot(cfg())
+        return snapshots.project_snapshot(project_cfg())
 
     @app.get(API + "/project/plan")
     def project_plan():
-        return snapshots.plan_documents(cfg())
+        return snapshots.plan_documents(project_cfg())
 
     @app.get(API + "/project/backlog")
     def project_backlog():
-        return {"tasks": snapshots.backlog(cfg())}
+        return {"tasks": snapshots.backlog(project_cfg())}
 
     @app.get(API + "/project/milestones")
     def project_milestones():
-        snap = snapshots.project_snapshot(cfg())
+        snap = snapshots.project_snapshot(project_cfg())
         return {"milestones": snap["milestones"],
                 "progress": snap["progress"]}
 
     @app.get(API + "/project/blockers")
     def project_blockers():
-        snap = snapshots.project_snapshot(cfg())
+        snap = snapshots.project_snapshot(project_cfg())
         return {"blockers": snap["blockers"],
                 "human_blockers": snap["human_blockers"]}
 
@@ -262,7 +301,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.post(API + "/project/plan/preview")
     def plan_preview(body: ProjectStartBody):
-        text, source = _resolve_plan(body, cfg())
+        text, source = _resolve_plan(body, project_cfg())
         from core.redact import redact
         return {"source": source, "length": len(text),
                 "content": redact(text[:200_000])}
@@ -278,7 +317,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.post(API + "/project/start")
     def project_start_route(body: ProjectStartBody):
-        configuration = cfg()
+        configuration = project_cfg()
         from core import projstate
         if projstate.exists(str(config_mod.AGENTIC_DIR)):
             raise HTTPException(409, "a project already exists; the "
@@ -297,7 +336,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
         def runner():
             from core.project import project_start
-            return project_start(load_cfg(), plan_path)
+            return project_start(configuration, plan_path)
         return _start_operation("project.start", runner,
                                 detail="architecting project")
 
@@ -307,7 +346,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
         def runner():
             from core.project import project_run
-            return project_run(load_cfg(), max_cycles=1)
+            return project_run(project_cfg(), max_cycles=1)
         return _start_operation("project.run", runner,
                                 detail="running one cycle")
 
@@ -315,7 +354,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def project_resume_route():
         from core.project import project_resume
         audit("ui_project_resume")
-        result = project_resume(cfg())
+        result = project_resume(project_cfg())
         bus.publish("state", {"changed": "scheduler"})
         return result
 
@@ -323,7 +362,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def project_pause_route():
         from core.project import project_pause
         audit("ui_project_pause")
-        result = project_pause(cfg())
+        result = project_pause(project_cfg())
         bus.publish("state", {"changed": "scheduler"})
         return result
 
@@ -333,14 +372,14 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
         def runner():
             from core.project import final_audit
-            return final_audit(load_cfg())
+            return final_audit(project_cfg())
         return _start_operation("project.review", runner,
                                 detail="running final audit")
 
     # -- agents -------------------------------------------------------------------
     @app.get(API + "/agents")
     def agents():
-        return {"agents": snapshots.agents_snapshot(cfg())}
+        return {"agents": snapshots.agents_snapshot(project_cfg())}
 
     # -- backends -------------------------------------------------------------------
     @app.get(API + "/backends")
@@ -516,12 +555,19 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         confirm: bool = False
 
     DESTRUCTIVE_PROJECT_ACTIONS = {"archive", "remove", "stop"}
-    PROJECT_ACTIONS = {"init", "start", "doctor", "pause", "resume", "stop",
+    PROJECT_ACTIONS = {"select", "init", "start", "doctor", "pause", "resume", "stop",
                        "enable", "archive", "remove"}
 
     @app.get(API + "/portfolio")
     def portfolio_view():
         return portfolio_mod.portfolio_snapshot(cfg())
+
+    @app.get(API + "/project-selection")
+    def project_selection():
+        _registry, record = _selected_record()
+        return {"project_id": record["id"] if record else None,
+                "name": record["name"] if record else None}
+
 
     @app.post(API + "/portfolio/add")
     def portfolio_add(body: AddProjectBody):
@@ -545,6 +591,11 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         if action in DESTRUCTIVE_PROJECT_ACTIONS and not body.confirm:
             raise HTTPException(422, "confirmation required for %s"
                                 % action)
+        if action == "select":
+            record = _select_project(project_id)
+            audit("ui_project_select", project=record["id"])
+            bus.publish("state", {"changed": "project-selection"})
+            return {"project_id": record["id"], "name": record["name"]}
         if action == "start":
             from core import projectops, projstate
             from core.project import project_start
