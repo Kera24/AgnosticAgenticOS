@@ -319,12 +319,12 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def project_start_route(body: ProjectStartBody):
         configuration = project_cfg()
         from core import projstate
-        if projstate.exists(str(config_mod.AGENTIC_DIR)):
+        if projstate.exists(configuration["runtime"]["project_dir"]):
             raise HTTPException(409, "a project already exists; the "
                                      "dashboard never deletes project state")
         text, source = _resolve_plan(body, configuration)
-        plans_dir = os.path.join(str(config_mod.AGENTIC_DIR), "runs",
-                                 "ui-plans")
+        plans_dir = os.path.join(configuration["runtime"]["project_dir"],
+                                 "runs", "ui-plans")
         os.makedirs(plans_dir, exist_ok=True)
         plan_path = os.path.join(plans_dir, "plan-%s.md"
                                  % _dt.datetime.now().strftime(
