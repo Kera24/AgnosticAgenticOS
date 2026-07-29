@@ -92,8 +92,9 @@ def _platform_neutral_read_check(command, repo_root):
 
 
 _LOCAL_ASSET_RE = re.compile(
-    String.raw\`(?i)(?:src|href)\s*=\s*["']([^"'#?]+)["']|\`
-    String.raw\`["']([^"']+\.(?:html|css|js|mjs))["']\`)
+    r'''(?i)(?:src|href)\s*=\s*["']([^"'#?]+)["']|'''
+    r'''["']([^"']+\.(?:html|css|js|mjs))["']''')
+
 
 
 def _safe_local_asset(base_path, reference):
