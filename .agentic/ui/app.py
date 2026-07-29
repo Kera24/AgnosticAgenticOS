@@ -56,10 +56,15 @@ def _loopback_origin(origin):
 
 
 def create_app(load_cfg=None, detector=None, static_dir=None,
-               allow_dev_origin=False):
+               allow_dev_origin=False, enable_project_selection=None):
     """Build the app. `load_cfg`/`detector` are injectable for tests so no
     real CLI is ever probed or invoked during testing."""
+    injected_load_cfg = load_cfg is not None
     load_cfg = load_cfg or (lambda: config_mod.load_config())
+    if enable_project_selection is None:
+        # Synthetic/injected configurations used by tests and embedders must
+        # never inherit a real machine's persisted dashboard selection.
+        enable_project_selection = not injected_load_cfg
     bus = EventBus()
     memory = str(config_mod.AGENTIC_DIR / "memory")
     ops = OperationManager(bus, persist_path=os.path.join(
@@ -115,6 +120,8 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def _selected_record():
         """Return the explicitly selected registered project, if any."""
         from core.registry import ProjectRegistry, RegistryError
+        if not enable_project_selection:
+            return ProjectRegistry(), None
         registry = ProjectRegistry()
         path = os.path.join(registry.home, "ui-selected-project.json")
         try:
