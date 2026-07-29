@@ -245,6 +245,23 @@ def terminate_tree(proc, graceful_timeout=DEFAULT_GRACEFUL_TIMEOUT,
     graceful_timeout + forced_timeout at the very most -- never blocks
     indefinitely, regardless of whether the child (or its descendants)
     cooperate."""
+    # CREATE_NO_WINDOW children have no console and therefore cannot
+    # receive CTRL_BREAK_EVENT. Waiting through the graceful window would
+    # only add a guaranteed delay before the same targeted tree kill. On
+    # Windows, terminate the owned PID tree immediately; POSIX children keep
+    # the cooperative SIGTERM grace period.
+    if _IS_WINDOWS:
+        if on_state:
+            on_state(SUPERVISOR_FORCE_TERMINATING)
+        _force_kill_tree_by_pid(proc.pid)
+        deadline = time.monotonic() + forced_timeout
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        return {"graceful_attempted": False, "forced": True,
+                "tree_confirmed_stopped": proc.poll() is not None}
+
     if on_state:
         on_state(SUPERVISOR_GRACEFUL_SHUTDOWN)
     graceful_attempted = _send_graceful_signal(proc)
@@ -278,12 +295,21 @@ def terminate_by_pid(record, graceful_timeout=DEFAULT_GRACEFUL_TIMEOUT,
                "reason": "process identity mismatch or already gone -- "
                          "refusing to act on a possibly-reused PID"}
     pid = record["pid"]
+    if _IS_WINDOWS:
+        _force_kill_tree_by_pid(pid)
+        deadline = time.monotonic() + forced_timeout
+        while time.monotonic() < deadline:
+            if not is_process_alive(pid):
+                break
+            time.sleep(0.2)
+        stopped = not is_process_alive(pid)
+        return {"terminated": stopped,
+                "termination": {"graceful_attempted": False, "forced": True,
+                                "tree_confirmed_stopped": stopped}}
+
     graceful_attempted = False
     try:
-        if _IS_WINDOWS:
-            os.kill(pid, signal.CTRL_BREAK_EVENT)
-        else:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
         graceful_attempted = True
     except Exception:   # noqa: BLE001
         pass
