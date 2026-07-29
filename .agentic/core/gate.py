@@ -114,6 +114,22 @@ def _safe_local_asset(base_path, reference):
     return candidate
 
 
+def _has_static_app_root(body):
+    """Return whether index HTML contains a meaningful application root.
+
+    Framework-style static apps commonly use an element with id="app", while
+    plain semantic applications often render directly inside <main>. Accept
+    either form, but do not let an empty <main> make a blank page pass.
+    """
+    if re.search(rb'id\s*=\s*["\x27]app["\x27]', body, re.I):
+        return True
+    main = re.search(rb'<main\b[^>]*>(.*?)</main\s*>', body, re.I | re.S)
+    if not main:
+        return False
+    meaningful = re.sub(rb'<!--.*?-->', b'', main.group(1), flags=re.S)
+    return bool(meaningful.strip())
+
+
 def run_local_static_app_smoke(repo_root):
     """Serve a static application on loopback and verify its load graph.
 
@@ -164,9 +180,9 @@ def run_local_static_app_smoke(repo_root):
                                   (asset, response.status))
                 body = response.read(1024 * 1024)
             loaded.append(asset)
-            if asset == "index.html" and not re.search(
-                    rb'id\s*=\s*["\x27]app["\x27]', body, re.I):
-                raise ValueError("index.html has no #app mount")
+            if asset == "index.html" and not _has_static_app_root(body):
+                raise ValueError(
+                    "index.html has neither #app mount nor non-empty <main> root")
             if asset.endswith((".html", ".js", ".mjs", ".css")):
                 text_body = body.decode("utf-8", errors="replace")
                 for match in _LOCAL_ASSET_RE.finditer(text_body):
@@ -177,8 +193,8 @@ def run_local_static_app_smoke(repo_root):
         record["passed"] = True
         record["exit_code"] = 0
         record["detail"] = (
-            "served and loaded static app over loopback HTTP; #app mount "
-            "present; loaded local assets: %s" % ", ".join(loaded))
+            "served and loaded static app over loopback HTTP; application "
+            "root present; loaded local assets: %s" % ", ".join(loaded))
     except Exception as exc:  # noqa: BLE001
         record["detail"] = "local static app load failed: %s" % exc
     finally:
