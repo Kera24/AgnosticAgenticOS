@@ -7,6 +7,13 @@ import datetime as _dt
 import json
 import os
 import shlex
+import functools
+import http.server
+import posixpath
+import re
+import threading
+import urllib.parse
+import urllib.request
 
 from . import execpolicy
 
@@ -82,6 +89,103 @@ def _platform_neutral_read_check(command, repo_root):
     except OSError as exc:
         return False, "file %r is not readable: %s" % (path, exc)
     return True, content[-1200:]
+
+
+_LOCAL_ASSET_RE = re.compile(
+    String.raw\`(?i)(?:src|href)\s*=\s*["']([^"'#?]+)["']|\`
+    String.raw\`["']([^"']+\.(?:html|css|js|mjs))["']\`)
+
+
+def _safe_local_asset(base_path, reference):
+    """Resolve a browser asset reference without permitting external access
+    or traversal outside the project root."""
+    parsed = urllib.parse.urlsplit(str(reference))
+    if parsed.scheme or parsed.netloc or str(reference).startswith("//"):
+        return None
+    raw_path = urllib.parse.unquote(parsed.path).replace("\\", "/")
+    if raw_path.startswith("/"):
+        candidate = posixpath.normpath(raw_path.lstrip("/"))
+    else:
+        candidate = posixpath.normpath(posixpath.join(
+            posixpath.dirname(base_path), raw_path))
+    if candidate in ("", ".") or candidate == ".." or candidate.startswith("../"):
+        return None
+    return candidate
+
+
+def run_local_static_app_smoke(repo_root):
+    """Serve a static application on loopback and verify its load graph.
+
+    This is deterministic evidence for source-plan criteria such as
+    "the application opens locally in a browser". It deliberately does not
+    contact an external network or invoke a shell. The check loads index.html,
+    verifies the application mount, follows local HTML script/style references
+    and local HTML/CSS/JS references found in those assets, and requires every
+    discovered resource to return HTTP 200.
+    """
+    index_path = os.path.join(repo_root, "index.html")
+    record = {
+        "name": "local-static-app-smoke",
+        "command": "internal: serve and load static app on loopback",
+        "mandatory": True,
+        "passed": False,
+        "exit_code": 1,
+        "detail": "",
+        "kind": "structural",
+        "platform_neutral": True,
+    }
+    if not os.path.isfile(index_path):
+        record["detail"] = "index.html does not exist"
+        return record
+
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, format, *args):  # noqa: A002
+            pass
+
+    handler = functools.partial(QuietHandler, directory=repo_root)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    loaded = []
+    try:
+        thread.start()
+        origin = "http://127.0.0.1:%d/" % server.server_address[1]
+        pending = ["index.html"]
+        seen = set()
+        while pending:
+            asset = pending.pop(0)
+            if asset in seen:
+                continue
+            seen.add(asset)
+            with urllib.request.urlopen(
+                    urllib.parse.urljoin(origin, asset), timeout=5) as response:
+                if response.status != 200:
+                    raise OSError("%s returned HTTP %s" %
+                                  (asset, response.status))
+                body = response.read(1024 * 1024)
+            loaded.append(asset)
+            if asset == "index.html" and not re.search(
+                    rb'id\s*=\s*["\x27]app["\x27]', body, re.I):
+                raise ValueError("index.html has no #app mount")
+            if asset.endswith((".html", ".js", ".mjs", ".css")):
+                text_body = body.decode("utf-8", errors="replace")
+                for match in _LOCAL_ASSET_RE.finditer(text_body):
+                    reference = match.group(1) or match.group(2)
+                    resolved = _safe_local_asset(asset, reference)
+                    if resolved and resolved not in seen:
+                        pending.append(resolved)
+        record["passed"] = True
+        record["exit_code"] = 0
+        record["detail"] = (
+            "served and loaded static app over loopback HTTP; #app mount "
+            "present; loaded local assets: %s" % ", ".join(loaded))
+    except Exception as exc:  # noqa: BLE001
+        record["detail"] = "local static app load failed: %s" % exc
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    return record
+
 
 # Deterministic-check classification (bootstrap fix): every check result is
 # tagged with exactly one of these kinds so callers can tell "a real test
