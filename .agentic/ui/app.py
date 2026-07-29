@@ -463,30 +463,30 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/context")
     def context_view():
-        return intel.context_snapshot(cfg())
+        return intel.context_snapshot(project_cfg())
 
     @app.get(API + "/context/search")
     def context_search(q: str = ""):
         q = q.strip()
         if not q:
             raise HTTPException(422, "query required")
-        return intel.context_search(cfg(), q[:500])
+        return intel.context_search(project_cfg(), q[:500])
 
     @app.get(API + "/memory")
     def memory_view(q: str = "", include_superseded: bool = False):
-        snapshot = intel.memory_snapshot(cfg())
+        snapshot = intel.memory_snapshot(project_cfg())
         snapshot.update(intel.memory_search(
             cfg(), q.strip()[:500], include_superseded=include_superseded))
         return snapshot
 
     @app.get(API + "/memory/{record_id}/timeline")
     def memory_timeline(record_id: str):
-        return intel.memory_timeline(cfg(), record_id[:64])
+        return intel.memory_timeline(project_cfg(), record_id[:64])
 
     @app.get(API + "/memory/records")
     def memory_records(ids: str = ""):
         wanted = [i.strip()[:64] for i in ids.split(",") if i.strip()][:20]
-        return intel.memory_details(cfg(), wanted)
+        return intel.memory_details(project_cfg(), wanted)
 
     class ForgetBody(BaseModel):
         id: str = Field(max_length=64)
@@ -497,7 +497,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         if not body.confirm:
             raise HTTPException(422, "confirmation required to forget a "
                                      "memory record")
-        result = intel.memory_forget(cfg(), body.id)
+        result = intel.memory_forget(project_cfg(), body.id)
         audit("ui_memory_forget", record=body.id,
               forgotten=result["forgotten"])
         if not result["forgotten"]:
@@ -506,12 +506,12 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/knowledge")
     def knowledge_view():
-        return intel.knowledge_snapshot(cfg())
+        return intel.knowledge_snapshot(project_cfg())
 
     @app.get(API + "/knowledge/doc")
     def knowledge_doc(path: str):
         try:
-            doc = intel.knowledge_document(cfg(), path[:500])
+            doc = intel.knowledge_document(project_cfg(), path[:500])
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if doc is None:
@@ -520,7 +520,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/skills")
     def skills_view():
-        return intel.skills_snapshot(cfg())
+        return intel.skills_snapshot(project_cfg())
 
     @app.post(API + "/skills/{skill_id}/{action}")
     def skills_action(skill_id: str, action: str, body: ConfirmBody):
@@ -530,7 +530,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
             raise HTTPException(422, "confirmation required")
         from core.skillreg import SkillError
         try:
-            result = intel.skill_action(cfg(), skill_id[:64], action)
+            result = intel.skill_action(project_cfg(), skill_id[:64], action)
         except SkillError as exc:
             raise HTTPException(422, str(exc))
         audit("ui_skill_action", skill=skill_id[:64], action=action)
@@ -539,7 +539,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/routing")
     def routing_view():
-        return intel.routing_snapshot(cfg())
+        return intel.routing_snapshot(project_cfg())
 
     # -- multi-project portfolio / fleet / mcp / auth (MP Phase 9) -----------
     from ui import portfolio as portfolio_mod
