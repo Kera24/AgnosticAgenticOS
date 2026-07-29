@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agentic OS entry point.
+r"""Agentic OS entry point.
 
 Repository maintenance:
   python .agentic/run doctor            validate environment + configuration
