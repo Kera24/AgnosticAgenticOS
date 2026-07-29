@@ -264,3 +264,36 @@ def test_portfolio_mutations_loopback_guarded(ui_client):
                         json={"name": "x", "root": "C:\\x"},
                         headers={"Origin": "https://evil.example.com"})
     assert r2.status_code == 403
+
+
+def test_select_project_drives_project_api_overlay(ui_client, monkeypatch):
+    first = add_app_folder(ui_client, "first-app")
+    second = add_app_folder(ui_client, "second-app")
+
+    selected = ui_client.post(
+        "/api/v1/portfolio/%s/select" % second["id"], json={})
+    assert selected.status_code == 200
+    assert selected.json()["project_id"] == second["id"]
+    assert ui_client.get("/api/v1/project-selection").json() == {
+        "project_id": second["id"], "name": second["name"]}
+
+    captured = {}
+    from ui import snapshots
+
+    def fake_snapshot(configuration):
+        captured["root"] = str(configuration["runtime"]["root"])
+        captured["project_dir"] = configuration["runtime"]["project_dir"]
+        return {"exists": False}
+
+    monkeypatch.setattr(snapshots, "project_snapshot", fake_snapshot)
+    response = ui_client.get("/api/v1/project")
+    assert response.status_code == 200
+    assert captured["root"] == second["root_path"]
+    assert second["id"] in captured["project_dir"]
+    assert captured["root"] != first["root_path"]
+
+
+def test_select_project_rejects_unknown_registry_id(ui_client):
+    response = ui_client.post(
+        "/api/v1/portfolio/not-registered/select", json={})
+    assert response.status_code == 404
