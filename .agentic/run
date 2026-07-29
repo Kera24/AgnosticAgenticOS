@@ -286,6 +286,7 @@ def cmd_project_pause(cfg, args):
 
 def cmd_project_review(cfg, args):
     from core.project import final_audit
+    cfg, _memory = _apply_project_overlay(cfg, args)
     result = final_audit(cfg, overrides=_overrides(args))
     _print(result)
     return 0 if result["status"] == "complete" else 1
