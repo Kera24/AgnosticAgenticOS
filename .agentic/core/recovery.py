@@ -218,8 +218,6 @@ def recover_windows_command_resolution_blocker(agentic_dir, cfg):
             "action": "reset_windows_command_resolution_blocker",
             "resolved_blockers": resolved,
             **evidence,
-            **({"archived_branch": archived["archived_branch"]}
-               if archived else {}),
         })
     if events:
         projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
