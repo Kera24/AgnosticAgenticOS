@@ -1261,6 +1261,10 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     block=True, blocking_reason=exc.detail[:200])
     taskspace.cleanup_task_worktree(p["root"], a, integration_task_id,
                                     success=True)
+    # Parallel candidates have their own integration id, but ownership is
+    # always claimed under the canonical backlog task id. Release both so a
+    # successful task can never block a dependent task that shares files.
+    taskspace.release_claim(a, task["id"])
     _index_project(cfg, project_worktree, p["memory"], log, full=False,
                    changed=changed)
     _record_capability_evidence_safe(a, order, task, gate_result, log,
