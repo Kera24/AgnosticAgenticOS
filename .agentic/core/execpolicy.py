@@ -68,6 +68,22 @@ def resolve_argv_executable(argv, env=None, platform=None, which=None):
         resolved[0] = found
     return resolved
 
+
+def windows_background_creationflags(existing=0, platform=None,
+                                     show_child_windows=False):
+    """Return Windows flags for a captured, non-interactive child process.
+
+    Agentic OS captures stdout/stderr and surfaces them through logs and the
+    UI, so verification tools and CLI agents do not need a visible console.
+    CREATE_NO_WINDOW prevents disruptive cmd/PowerShell flashes. The explicit
+    switch remains available to developers debugging a child interactively.
+    """
+    platform = platform or os.name
+    if platform != "nt" or show_child_windows:
+        return existing
+    return existing | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+
 def run_command(cmd, cwd, timeout, env=None, shell_required=False,
                 source="config", stdin_text=None, extra_env=None):
     """Execute one command under policy. Returns a result dict; raises
@@ -101,10 +117,11 @@ def run_command(cmd, cwd, timeout, env=None, shell_required=False,
         # CLI expecting a UTF-8 stdin stream (Codex, Claude Code, ...)
         # correctly rejects ("input is not valid UTF-8"). Every argv/prompt
         # this policy sends is UTF-8 by construction, so force it both ways.
-        proc = subprocess.run(popen_cmd, shell=use_shell, cwd=cwd,
-                              capture_output=True, text=True, timeout=timeout,
-                              env=run_env, input=stdin_text,
-                              encoding="utf-8", errors="replace")
+        proc = subprocess.run(
+            popen_cmd, shell=use_shell, cwd=cwd, capture_output=True,
+            text=True, timeout=timeout, env=run_env, input=stdin_text,
+            encoding="utf-8", errors="replace",
+            creationflags=windows_background_creationflags())
         result["exit_code"] = proc.returncode
         result["stdout"] = proc.stdout or ""
         result["stderr"] = proc.stderr or ""
