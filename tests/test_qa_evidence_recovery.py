@@ -87,3 +87,53 @@ def test_full_recovery_removes_corrected_qa_evidence_failure_from_streak(
     assert streak["resulting_streak"] == 0
     assert [item["run_id"] for item in streak["removed_platform_failures"]] == [
         "r1"]
+
+
+
+def test_recovery_resets_task_worktree_that_predates_filter_feature(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task = simple_task("t9-test-suite-setup")
+    seed_project(sandbox, [task])
+    agentic = str(sandbox["agentic"])
+    reason = (
+        "Required real all/active/completed filter behavior is absent from "
+        "repository source, and the work order only allows editing "
+        "package.json and tests/*.test.js.")
+    projstate.update_task(agentic, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(agentic, task["id"], reason, human_only=False,
+                          code=None)
+
+    project_index = (sandbox["agentic"] / "worktrees" / "project" /
+                     "src" / "index.js")
+    task_index = (sandbox["agentic"] / "worktrees" / "tasks" / task["id"] /
+                  "src" / "index.js")
+    project_index.parent.mkdir(parents=True)
+    task_index.parent.mkdir(parents=True)
+    project_index.write_text(
+        "const activeFilter='all'; el.dataset.taskFilter='all';",
+        encoding="utf-8")
+    task_index.write_text("export function render() {}", encoding="utf-8")
+
+    archived = []
+    monkeypatch.setattr(
+        recovery.taskspace, "archive_and_reset_task_worktree",
+        lambda root, agentic_dir, task_id, evidence_id: (
+            archived.append((task_id, evidence_id)) or
+            {"archived_branch": "agentic/evidence/t9-r1"}))
+    memory = str(sandbox["agentic"] / "memory")
+    scheduler = Scheduler(sandbox["cfg"], memory, clock=Clock())
+    scheduler.state["current_cycle"] = "r1"
+    scheduler.save()
+
+    events = recovery.recover_stale_filter_source_blocker(
+        agentic, str(sandbox["repo"]), scheduler)
+
+    assert archived == [(task["id"], "r1")]
+    assert events[0]["action"] == (
+        "archive_stale_recovered_task_worktree_and_retry")
+    updated = {item["id"]: item
+               for item in projstate.load_backlog(agentic)}[task["id"]]
+    assert updated["status"] == "pending"
+    assert not projstate.open_blockers(agentic)
