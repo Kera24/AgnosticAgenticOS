@@ -44,6 +44,7 @@ Full-project build:
   python .agentic/run project-run [--primary X --fallback Y --fallback Z]
   python .agentic/run project-resume | project-status | project-pause
   python .agentic/run project-review    run the final audit now
+  python .agentic/run release-check     test platform, build UI, verify pilots
   python .agentic/run capacity          capacity ledger + next-cycle estimate
   python .agentic/run backends          backend circuit-breaker states
   python .agentic/run backends reset-breaker <backend>
@@ -290,6 +291,13 @@ def cmd_project_review(cfg, args):
     result = final_audit(cfg, overrides=_overrides(args))
     _print(result)
     return 0 if result["status"] == "complete" else 1
+
+
+def cmd_release_check(cfg, args):
+    from core.releasecheck import run_release_check
+    result = run_release_check(cfg)
+    _print(result)
+    return 0 if result["ready"] else 1
 
 
 def cmd_capacity(cfg, args):
@@ -1454,7 +1462,8 @@ COMMANDS = {
     "setup": cmd_setup, "project-start": cmd_project_start,
     "project-run": cmd_project_run, "project-resume": cmd_project_resume,
     "project-status": cmd_project_status, "project-pause": cmd_project_pause,
-    "project-review": cmd_project_review, "capacity": cmd_capacity,
+    "project-review": cmd_project_review,
+    "release-check": cmd_release_check, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
     "context": cmd_context, "cache": cmd_cache, "runs": cmd_runs,
     "memory": cmd_memory,
