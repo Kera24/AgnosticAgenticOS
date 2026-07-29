@@ -140,7 +140,11 @@ def test_graceful_shutdown_succeeds_without_forced_kill():
                                   graceful_timeout=5, forced_timeout=10)
     assert r["timed_out"] is True
     termination = r["supervisor"]["termination"]
-    assert termination["graceful_attempted"] is True
+    # Hidden Windows children have no console for CTRL_BREAK, so the
+    # supervisor correctly skips an impossible grace period and performs a
+    # targeted tree termination immediately. POSIX retains graceful SIGTERM.
+    assert termination["graceful_attempted"] is (os.name != "nt")
+    assert termination["forced"] is (os.name == "nt")
     assert termination["tree_confirmed_stopped"] is True
 
 
