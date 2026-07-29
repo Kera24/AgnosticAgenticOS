@@ -103,8 +103,9 @@ def test_portfolio_start_uses_registered_project_overlay(ui_client,
     import core.project as project_mod
 
     def fake_start(cfg, plan, **kw):
+        from core import config as config_mod
         captured["project_dir"] = cfg["runtime"]["project_dir"]
-        captured["root"] = str(cfg["runtime"]["root"])
+        captured["root"] = str(config_mod.repo_root(cfg))
         captured["plan"] = plan
         return {"status": "started"}
 
