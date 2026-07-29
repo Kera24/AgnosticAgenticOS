@@ -281,7 +281,7 @@ def test_select_project_drives_project_api_overlay(ui_client, monkeypatch):
     from ui import snapshots
 
     def fake_snapshot(configuration):
-        captured["root"] = str(configuration["runtime"]["root"])
+        captured["root"] = str(configuration["project"]["repository_root"])
         captured["project_dir"] = configuration["runtime"]["project_dir"]
         return {"exists": False}
 
