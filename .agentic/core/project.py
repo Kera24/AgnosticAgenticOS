@@ -1667,6 +1667,12 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     worktree = ensure_project_worktree(cfg, p)
     progress = projstate.refresh_progress(a)
     criteria = projstate.read_yaml(a, "acceptance-criteria.yaml", {}) or {}
+    try:
+        with open(os.path.join(projstate.project_dir(a), "PROJECT.md"),
+                  encoding="utf-8") as fh:
+            source_plan = fh.read()[-6000:]
+    except OSError:
+        source_plan = ""
     checks = {}
     checks["backlog_complete"] = progress.get("backlog_complete", False)
     checks["all_milestones_done"] = bool(progress.get("milestones")) and all(
@@ -1717,6 +1723,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
                                        "allowed_paths": ["**"],
                                        "spec": "independent final review"},
                         "progress": progress,
+                        "source_plan": source_plan,
                         "completion_contract": completion_contract,
                         "historical_task_evidence": task_evidence,
                         "deterministic_checks": {
@@ -1743,6 +1750,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
              "complete": complete, "checks": checks,
              "final_review": review,
              "completion_criteria": criteria.get("completion_criteria", []),
+             "source_plan": source_plan,
              "completion_contract": completion_contract,
              "historical_task_evidence": task_evidence,
              "branch": PROJECT_BRANCH}
