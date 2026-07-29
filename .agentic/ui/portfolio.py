@@ -26,6 +26,25 @@ def portfolio_snapshot(cfg):
         from core.scheduler import Scheduler
         scheduler = Scheduler(proj_cfg,
                               os.path.join(runtime_dir, "memory"))
+        final_audit = projstate.read_yaml(
+            runtime_dir, "final-audit.yaml", None) or None
+        audit_summary = None
+        if final_audit is not None:
+            failed_checks = [
+                key for key, passed in
+                (final_audit.get("checks") or {}).items() if not passed]
+            failure_details = final_audit.get("failure_details") or []
+            audit_summary = {
+                "complete": bool(final_audit.get("complete")),
+                "failed_checks": failed_checks,
+                "failure_details": failure_details,
+            }
+            if scheduler.state.get("project_status") == "audit_failed" and \
+                    failure_details:
+                first = failure_details[0]
+                reason = "%s: %s" % (
+                    first.get("name") or first.get("check"),
+                    first.get("detail") or "audit check failed")
         from core.taskspace import ProjectLease, active_claims
         lease = ProjectLease(runtime_dir, record["id"]).holder()
         integrations = projectops.detect_integrations(record["root_path"]) \
@@ -72,6 +91,7 @@ def portfolio_snapshot(cfg):
                              record.get("supabase_project_ref")},
             "code_index": index_state,
             "runtime_dir": runtime_dir,
+            "final_audit": audit_summary,
         })
     return {"projects": projects,
             "runtime_home": registry.home,
