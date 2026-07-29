@@ -487,6 +487,48 @@ def recover_stale_filter_source_blocker(agentic_dir, root, scheduler):
     return events
 
 
+# -- source-plan acceptance fidelity -----------------------------------------
+
+_OVER_SPECIFIC_FILE_URL_CRITERION = (
+    "Application loads locally at file:// URL and renders task list")
+_ORIGINAL_LOCAL_BROWSER_CRITERION = (
+    "The application opens locally in a browser.")
+
+
+def recover_over_specific_file_url_criterion(agentic_dir):
+    """Restore the source plan's acceptance semantics when a legacy architect
+    invented a file:// transport constraint that the plan never requested."""
+    project_path = os.path.join(
+        projstate.project_dir(agentic_dir), "PROJECT.md")
+    try:
+        with open(project_path, encoding="utf-8") as fh:
+            plan = fh.read()
+    except OSError:
+        return []
+    plan_lower = plan.lower()
+    if "file://" in plan_lower or \
+            "the application opens locally in a browser" not in plan_lower:
+        return []
+    criteria = projstate.read_yaml(
+        agentic_dir, "acceptance-criteria.yaml", {}) or {}
+    completion = list(criteria.get("completion_criteria") or [])
+    changed = False
+    for index, criterion in enumerate(completion):
+        if str(criterion).strip() == _OVER_SPECIFIC_FILE_URL_CRITERION:
+            completion[index] = _ORIGINAL_LOCAL_BROWSER_CRITERION
+            changed = True
+    if not changed:
+        return []
+    criteria["completion_criteria"] = completion
+    projstate.write_yaml(agentic_dir, "acceptance-criteria.yaml", criteria)
+    return [{
+        "action": "restore_source_plan_local_browser_criterion",
+        "from": _OVER_SPECIFIC_FILE_URL_CRITERION,
+        "to": _ORIGINAL_LOCAL_BROWSER_CRITERION,
+        "evidence_ref": project_path,
+    }]
+
+
 # -- fixed platform-neutral documentation read check -------------------------
 
 _REPEATED_IDENTICAL_REASONS = {
@@ -880,6 +922,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     contract_events += \
         contract_recovery.recover_stable_contract_authority_blockers(
             agentic_dir, memory_dir, cfg)
+    plan_fidelity_events = recover_over_specific_file_url_criterion(
+        agentic_dir)
     stages["aggregate_candidate_cause_reconstruction"] = _stage(
         "aggregate_candidate_cause_reconstruction", aggregate_events)
     stages["fixed_platform_defect_recovery"] = _stage(
@@ -887,7 +931,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         [e for e in aggregate_events if e.get("recovered")] +
         contract_events + windows_codex_events + windows_command_events +
         task_gate_events + qa_evidence_events + stale_source_events +
-        read_check_events + secret_scan_events + integration_events)
+        read_check_events + secret_scan_events + integration_events +
+        plan_fidelity_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",
