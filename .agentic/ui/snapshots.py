@@ -352,7 +352,7 @@ def _capacity_events(limit=25):
 
 def verification_snapshot(cfg):
     a = _agentic(cfg)
-    workdir = _worktree_path() if os.path.exists(_worktree_path()) \
+    workdir = _worktree_path(cfg) if os.path.exists(_worktree_path(cfg)) \
         else str(config_mod.repo_root(cfg))
     commands, auto = gate.resolve_commands(cfg, workdir)
     baseline = gate.load_baseline(a)
