@@ -28,7 +28,8 @@ def ui_client(sandbox, monkeypatch, tmp_path):
     cfg["backends"] = {"mock": {"type": "api", "provider": "mock",
                                 "model": "mock-model"}}
     cfg["routing"] = {"mode": "simple", "primary": "mock", "fallbacks": []}
-    app = create_app(load_cfg=lambda: cfg, detector=NO_DETECT)
+    app = create_app(load_cfg=lambda: cfg, detector=NO_DETECT,
+                     enable_project_selection=True)
     client = TestClient(app, base_url="http://127.0.0.1")
     client.sandbox = sandbox
     client.tmp = tmp_path
