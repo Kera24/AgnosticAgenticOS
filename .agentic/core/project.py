@@ -1680,6 +1680,17 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     checks["no_open_blockers"] = not projstate.open_blockers(a)
     gate_result = gate.run_checks(cfg, worktree,
                                   os.path.join(p["runs"], "final-audit"))
+    completion_criteria = criteria.get("completion_criteria", [])
+    needs_local_browser_smoke = any(
+        "browser" in str(item).lower() and
+        ("open" in str(item).lower() or "load" in str(item).lower())
+        for item in completion_criteria)
+    if needs_local_browser_smoke:
+        browser_smoke = gate.run_local_static_app_smoke(worktree)
+        gate_result["results"].append(browser_smoke)
+        if browser_smoke["mandatory"] and not browser_smoke["passed"]:
+            gate_result["ok"] = False
+        checks["local_browser_smoke"] = browser_smoke["passed"]
     checks["deterministic_checks_pass"] = gate_result["ok"] and \
         not gate_result["no_checks"]
     # running the deterministic checks just above is itself what can
