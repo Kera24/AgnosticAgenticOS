@@ -1580,6 +1580,78 @@ def project_resume(cfg):
 
 # -- final audit --------------------------------------------------------------------------
 
+
+def _historical_task_evidence(runs_dir, limit=20):
+    """Collect bounded, successful canonical task-check evidence for final QA.
+
+    The newest successful validation per task wins. Only task-specific checks
+    are included, preventing auto-detected suite noise from consuming the
+    final review context.
+    """
+    evidence = {}
+    try:
+        cycle_names = sorted(
+            (name for name in os.listdir(runs_dir)
+             if name.startswith("cycle-")), reverse=True)
+    except OSError:
+        return []
+    for cycle_name in cycle_names:
+        cycle_dir = os.path.join(runs_dir, cycle_name)
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        task_id = contract.get("task_id")
+        if not task_id or task_id in evidence:
+            continue
+        required = set(str(command) for command in
+                       contract.get("deterministic_checks") or [])
+        try:
+            validation_names = sorted(
+                (name for name in os.listdir(cycle_dir)
+                 if name.startswith("validation-result-") and
+                 name.endswith(".json")), reverse=True)
+        except OSError:
+            continue
+        for validation_name in validation_names:
+            try:
+                with open(os.path.join(cycle_dir, validation_name),
+                          encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if not validation.get("ok"):
+                continue
+            checks = []
+            for result in validation.get("results") or []:
+                command = str(result.get("command") or "")
+                if not result.get("passed") or not result.get("mandatory"):
+                    continue
+                if not (str(result.get("name") or "").startswith(
+                        "task-deterministic-") or command in required):
+                    continue
+                checks.append({
+                    "name": result.get("name"),
+                    "command": command,
+                    "passed": True,
+                    "detail": (str(result.get("detail") or ""))[-1200:],
+                })
+            if checks:
+                evidence[task_id] = {
+                    "task_id": task_id,
+                    "run_id": contract.get("run_id") or
+                              cycle_name.replace("cycle-", "", 1),
+                    "acceptance_criteria":
+                        contract.get("acceptance_criteria") or [],
+                    "checks": checks[:2],
+                }
+                break
+        if len(evidence) >= limit:
+            break
+    return [evidence[key] for key in sorted(evidence)]
+
 def final_audit(cfg, caller=None, overrides=None, clock=None,
                 _preloaded=None, **kw):
     """Completion requires evidence, not an empty backlog."""
@@ -1622,6 +1694,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     completion_contract = _build_completion_contract_safe(
         a, criteria.get("requirements_map", []), log)
     checks["completion_contract_verified"] = completion_contract["complete"]
+    task_evidence = _historical_task_evidence(p["runs"])
     review = None
     if all(checks.values()) and caller is not None:
         # the final auditor gets its own routing chain when the capability
@@ -1644,13 +1717,18 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
                                        "allowed_paths": ["**"],
                                        "spec": "independent final review"},
                         "progress": progress,
+                        "completion_contract": completion_contract,
+                        "historical_task_evidence": task_evidence,
                         "deterministic_checks": {
                             "ok": gate_result["ok"],
-                            "results": [
-                                {k: r[k] for k in ("name", "passed",
-                                                   "mandatory")}
-                                for r in gate_result["results"]]},
-                        "diff": "final audit: see repository state",
+                            "results": [{
+                                "name": r["name"],
+                                "passed": r["passed"],
+                                "mandatory": r["mandatory"],
+                                "command": r.get("command"),
+                                "detail": (r.get("detail") or "")[-1200:],
+                            } for r in gate_result["results"]]},
+                        "diff": "final audit: live project state is authoritative",
                         "changed_files": []},
                        schema=_schema("verification.schema.json"),
                        workspace=worktree, permissions="read",
@@ -1666,6 +1744,7 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
              "final_review": review,
              "completion_criteria": criteria.get("completion_criteria", []),
              "completion_contract": completion_contract,
+             "historical_task_evidence": task_evidence,
              "branch": PROJECT_BRANCH}
     projstate.write_yaml(a, "final-audit.yaml", audit)
     from .knowledge import update_knowledge
