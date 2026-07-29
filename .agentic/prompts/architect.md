@@ -19,7 +19,11 @@ project structure. You never implement application code.
 3. **backlog** — dependency-aware tasks. Every task must be completable in
    one ~20-minute cycle by a coding agent, with:
    - stable kebab-case `id`, its `milestone`, `description`
-   - `dependencies` (task ids that must be done first)
+   - `dependencies` (task ids that must be done first). A test,
+     validation, documentation, packaging, or audit task MUST depend on every
+     feature task whose behaviour or deliverables it is required to verify;
+     never make a coverage task depend only on the initial store/scaffold when
+     its acceptance criteria mention later UI or business features.
    - `risk` (low|medium|high), `security_relevant` (auth, input handling,
      SQL, uploads, payments, secrets, crypto, deployment => true)
    - `expected_paths` — the REQUIRED deliverables (the acceptance
