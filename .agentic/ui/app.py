@@ -265,7 +265,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     @app.get(API + "/project/activity")
     def project_activity(limit: int = 300):
         limit = max(1, min(int(limit), 1000))
-        return {"entries": snapshots.activity_entries(limit=limit)}
+        return {"entries": snapshots.activity_entries(limit=limit, cfg=project_cfg())}
 
     def _resolve_plan(body: ProjectStartBody, configuration):
         provided = [p for p in (body.plan_text, body.plan_path)
@@ -445,16 +445,16 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     # -- capacity / verification -------------------------------------------------
     @app.get(API + "/capacity")
     def capacity():
-        return snapshots.capacity_snapshot(cfg())
+        return snapshots.capacity_snapshot(project_cfg())
 
     @app.get(API + "/verification")
     def verification():
-        return snapshots.verification_snapshot(cfg())
+        return snapshots.verification_snapshot(project_cfg())
 
     @app.get(API + "/logs/{run}/{name}")
     def run_log(run: str, name: str):
         try:
-            return snapshots.read_run_log(run, name)
+            return snapshots.read_run_log(run, name, cfg=project_cfg())
         except snapshots.LogAccessError as exc:
             raise HTTPException(404, str(exc))
 
@@ -555,8 +555,10 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         confirm: bool = False
 
     DESTRUCTIVE_PROJECT_ACTIONS = {"archive", "remove", "stop"}
-    PROJECT_ACTIONS = {"select", "init", "start", "doctor", "pause", "resume", "stop",
-                       "enable", "archive", "remove"}
+    PROJECT_ACTIONS = {
+        "select", "init", "start", "doctor", "pause", "resume", "stop",
+        "enable", "archive", "remove",
+    }
 
     @app.get(API + "/portfolio")
     def portfolio_view():
