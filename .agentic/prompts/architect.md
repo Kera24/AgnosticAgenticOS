@@ -54,6 +54,10 @@ project structure. You never implement application code.
 4. **requirements_map** — every plan requirement mapped to task ids.
 5. **completion_criteria** — what must be true for the whole application to
    be done (all mandatory checks green, build passes, core journeys tested).
+   Preserve the plan's meaning exactly: you may clarify a criterion, but never
+   strengthen it with an unrequested protocol, transport, deployment target,
+   browser mode, vendor, or implementation constraint. For example, "opens
+   locally in a browser" does NOT mean "must load from a file:// URL".
 6. **human_decisions** — ONLY decisions a human genuinely must make
    (accounts, paid services, legal, irreversible choices). Ordinary
    engineering choices are yours.
