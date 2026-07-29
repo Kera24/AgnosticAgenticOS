@@ -103,6 +103,8 @@ export function Portfolio() {
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["portfolio"] });
     queryClient.invalidateQueries({ queryKey: ["fleet"] });
+    queryClient.invalidateQueries({ queryKey: ["project-selection"] });
+    queryClient.invalidateQueries({ queryKey: ["project"] });
   };
 
   const act = useMutation({
@@ -110,7 +112,12 @@ export function Portfolio() {
       { id: string; action: string; confirmed?: boolean }) =>
       api.post(`/portfolio/${id}/${action}`,
                confirmed ? { confirm: true } : {}),
-    onSuccess: () => { setConfirm(null); setError(null); refresh(); },
+    onSuccess: (_data, variables) => {
+      setConfirm(null);
+      setError(null);
+      if (variables.action === "select") setSelected(null);
+      refresh();
+    },
     onError: (err) => {
       setConfirm(null);
       setError(err instanceof ApiError ? err.message : String(err));
@@ -358,6 +365,11 @@ export function Portfolio() {
               ]}
             />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="btn primary"
+                onClick={() =>
+                  act.mutate({ id: selected.id, action: "select" })}>
+                Select project
+              </button>
               <button className="btn"
                 onClick={() =>
                   act.mutate({ id: selected.id, action: "doctor" })}>
