@@ -684,18 +684,22 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
 
     aggregate_events = parallel_recovery.recover_parallel_candidate_aggregate(
         agentic_dir)
-    for event in windows_command_events + task_gate_events:
+    for event in (windows_command_events + task_gate_events +
+                  qa_evidence_events):
+        action = event.get("action")
+        if action == "reset_windows_command_resolution_blocker":
+            failure_class = "platform_capability_missing"
+        elif action == "reset_qa_semantic_evidence_blocker":
+            failure_class = "legacy_qa_evidence_omission"
+        else:
+            failure_class = "task_contract_invalid"
         logs.decision(memory_dir, {
             "event": "failure_classified",
             "run_id": event["run_id"],
             "task_id": event["task_id"],
-            "failure_class": (
-                "platform_capability_missing"
-                if event.get("action") ==
-                "reset_windows_command_resolution_blocker"
-                else "task_contract_invalid"),
+            "failure_class": failure_class,
             "platform_class": True,
-            "corrected_by": event.get("action"),
+            "corrected_by": action,
             "evidence_ref": event["evidence_ref"],
         })
     contract_events = contract_recovery.recover_contract_divergence_blockers(
