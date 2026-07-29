@@ -112,7 +112,7 @@ def test_recovery_resets_task_worktree_that_predates_filter_feature(
     project_index.parent.mkdir(parents=True)
     task_index.parent.mkdir(parents=True)
     project_index.write_text(
-        "const activeFilter='all'; el.dataset.taskFilter='all';",
+        "const activeFilter='all'; button.getAttribute('data-task-filter');",
         encoding="utf-8")
     task_index.write_text("export function render() {}", encoding="utf-8")
 
