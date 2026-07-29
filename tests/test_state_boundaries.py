@@ -12,7 +12,8 @@ def test_no_cwd_reliance_in_core_logic():
     convenience resolver (projectops.resolve_project)."""
     offenders = []
     for base, dirs, files in os.walk(CORE):
-        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        dirs[:] = [d for d in dirs if d not in {
+            "__pycache__", "worktrees", "runs", "memory"}]
         for name in files:
             if not name.endswith(".py"):
                 continue
