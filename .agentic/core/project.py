@@ -1656,6 +1656,52 @@ def _historical_task_evidence(runs_dir, limit=20):
             break
     return [evidence[key] for key in sorted(evidence)]
 
+
+def _final_audit_failure_details(checks, gate_result, dirty_paths=None,
+                                 completion_contract=None, review=None):
+    """Build bounded, persisted explanations for every failed audit gate."""
+    details = []
+    for result in (gate_result or {}).get("results", []):
+        if result.get("mandatory") and not result.get("passed"):
+            name = result.get("name") or "deterministic-check"
+            check = ("local_browser_smoke"
+                     if name == "local-static-app-smoke"
+                     else "deterministic_checks_pass")
+            details.append({
+                "check": check, "name": name,
+                "command": result.get("command"),
+                "exit_code": result.get("exit_code"),
+                "kind": result.get("kind"),
+                "detail": (result.get("detail") or "check failed")[-2000:],
+            })
+    explained = {item["check"] for item in details}
+    generic = {
+        "backlog_complete": "project backlog is not complete",
+        "all_milestones_done": "one or more milestones are not done",
+        "no_open_blockers": "one or more project blockers remain open",
+        "no_uncommitted_changes":
+            "uncommitted project changes remain: %s" %
+            ", ".join((dirty_paths or [])[:20]),
+        "no_committed_secrets":
+            "committed diff matched the secret-scanning policy",
+        "env_example_present":
+            "environment variables are used but .env.example is missing",
+        "completion_contract_verified":
+            "completion contract has unverified requirements: %s" %
+            ", ".join((completion_contract or {}).get("unverified", [])[:20]),
+        "final_independent_review":
+            ("independent reviewer did not return a passing verdict"
+             if not review else
+             "independent reviewer verdict: %s" % review.get("verdict")),
+    }
+    for check, passed in checks.items():
+        if not passed and check not in explained:
+            details.append({"check": check, "name": check, "command": None,
+                            "exit_code": None, "kind": "audit",
+                            "detail": generic.get(check, "audit check failed")})
+    return details
+
+
 def final_audit(cfg, caller=None, overrides=None, clock=None,
                 _preloaded=None, **kw):
     """Completion requires evidence, not an empty backlog."""
@@ -1761,8 +1807,24 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     else:
         checks["final_independent_review"] = False
     complete = all(checks.values())
+    deterministic_evidence = {
+        "ok": gate_result.get("ok", False),
+        "no_checks": gate_result.get("no_checks", False),
+        "auto_detected": gate_result.get("auto_detected", False),
+        "results": [{
+            "name": r.get("name"), "passed": r.get("passed"),
+            "mandatory": r.get("mandatory"), "command": r.get("command"),
+            "exit_code": r.get("exit_code"), "kind": r.get("kind"),
+            "detail": (r.get("detail") or "")[-2000:],
+        } for r in gate_result.get("results", [])],
+    }
+    failure_details = _final_audit_failure_details(
+        checks, gate_result, dirty_paths=dirty_paths,
+        completion_contract=completion_contract, review=review)
     audit = {"completed_at": _dt.datetime.now().isoformat(timespec="seconds"),
              "complete": complete, "checks": checks,
+             "failure_details": failure_details,
+             "deterministic_checks": deterministic_evidence,
              "final_review": review,
              "completion_criteria": criteria.get("completion_criteria", []),
              "source_plan": source_plan,
@@ -1781,7 +1843,8 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
         return {"status": "complete", "audit": audit}
     scheduler.set_project_status("audit_failed")
     return {"status": "audit_failed",
-            "failed_checks": [k for k, v in checks.items() if not v]}
+            "failed_checks": [k for k, v in checks.items() if not v],
+            "failure_details": failure_details}
 
 
 def _unload_local_models_safe(cfg, log):
