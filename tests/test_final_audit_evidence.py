@@ -63,3 +63,48 @@ def test_historical_task_evidence_ignores_failed_validation(tmp_path):
     }), encoding="utf-8")
 
     assert project._historical_task_evidence(str(tmp_path)) == []
+
+
+def test_final_audit_failure_details_preserve_check_output():
+    checks = {
+        "backlog_complete": True,
+        "local_browser_smoke": False,
+        "deterministic_checks_pass": False,
+        "final_independent_review": False,
+    }
+    gate_result = {"results": [{
+        "name": "local-static-app-smoke",
+        "command": "internal: serve and load static app on loopback",
+        "mandatory": True,
+        "passed": False,
+        "exit_code": 1,
+        "kind": "structural",
+        "detail": "index.html has no application root",
+    }]}
+
+    details = project._final_audit_failure_details(checks, gate_result)
+
+    assert details[0] == {
+        "check": "local_browser_smoke",
+        "name": "local-static-app-smoke",
+        "command": "internal: serve and load static app on loopback",
+        "exit_code": 1,
+        "kind": "structural",
+        "detail": "index.html has no application root",
+    }
+    assert any(item["check"] == "deterministic_checks_pass"
+               for item in details)
+    assert any(item["check"] == "final_independent_review"
+               for item in details)
+
+
+def test_final_audit_failure_details_bound_large_output():
+    checks = {"deterministic_checks_pass": False}
+    gate_result = {"results": [{
+        "name": "npm-test", "command": "npm test", "mandatory": True,
+        "passed": False, "detail": "x" * 5000,
+    }]}
+
+    details = project._final_audit_failure_details(checks, gate_result)
+
+    assert len(details[0]["detail"]) == 2000
