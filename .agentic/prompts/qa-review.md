@@ -14,6 +14,10 @@ the coder's conversation, and you cannot modify the implementation.
 
 ## Judge
 
+The live `progress`, `completion_contract`, deterministic results, and
+`historical_task_evidence` in the input are authoritative. Retrieved audit
+documents can be stale and must never override those live records.
+
 1. Every `done_when` condition and acceptance criterion — evidence must be in
    the diff or the check results.
 2. Functionality and regressions: does the change plausibly break adjacent
