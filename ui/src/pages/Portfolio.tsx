@@ -250,6 +250,15 @@ export function Portfolio() {
                           init
                         </button>
                       )}
+                      {p.state === "ready" && (
+                        <button className="btn primary"
+                          style={{ minHeight: 24 }}
+                          disabled={act.isPending}
+                          onClick={() =>
+                            act.mutate({ id: p.id, action: "start" })}>
+                          {act.isPending ? "starting…" : "start"}
+                        </button>
+                      )}
                       {p.state === "paused" ? (
                         <button className="btn" style={{ minHeight: 24 }}
                           onClick={() =>
