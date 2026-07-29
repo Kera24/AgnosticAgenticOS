@@ -50,6 +50,39 @@ def _platform_neutral_existence_check(command, repo_root):
     return exists, "%s %r %s" % (kind, path,
                                 "exists" if exists else "does not exist")
 
+
+def _platform_neutral_read_check(command, repo_root):
+    """Translate exactly `cat RELATIVE_FILE` into a bounded internal read.
+
+    This preserves the read-only intent of a common documentation check on
+    every OS without invoking a shell. Options, absolute paths, traversal,
+    multiple operands, directories, and unreadable files are rejected.
+    """
+    try:
+        tokens = shlex.split(str(command), posix=True)
+    except ValueError:
+        return None
+    if len(tokens) != 2 or tokens[0] != "cat":
+        return None
+    path = tokens[1]
+    if not path or path.startswith("-") or os.path.isabs(path):
+        return None
+    root = os.path.realpath(repo_root)
+    full = os.path.realpath(os.path.join(root, path))
+    try:
+        if os.path.commonpath([root, full]) != root:
+            return None
+    except ValueError:
+        return None
+    if not os.path.isfile(full):
+        return False, "file %r does not exist" % path
+    try:
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return False, "file %r is not readable: %s" % (path, exc)
+    return True, content[-1200:]
+
 # Deterministic-check classification (bootstrap fix): every check result is
 # tagged with exactly one of these kinds so callers can tell "a real test
 # suite ran and passed" apart from every other flavour of deterministic
@@ -189,6 +222,8 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None,
         # the safe capability layer's own primitive (a plain os.path
         # check) is both correct and platform-neutral, on every OS.
         neutral = _platform_neutral_existence_check(check["command"], workdir)
+        if neutral is None:
+            neutral = _platform_neutral_read_check(check["command"], workdir)
         if neutral is not None:
             record["passed"], record["detail"] = neutral
             record["exit_code"] = 0 if record["passed"] else 1
