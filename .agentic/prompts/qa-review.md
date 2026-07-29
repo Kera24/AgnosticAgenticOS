@@ -14,9 +14,12 @@ the coder's conversation, and you cannot modify the implementation.
 
 ## Judge
 
-The live `progress`, `completion_contract`, deterministic results, and
-`historical_task_evidence` in the input are authoritative. Retrieved audit
-documents can be stale and must never override those live records.
+The `source_plan` defines the requirement semantics. The live `progress`,
+`completion_contract`, deterministic results, and
+`historical_task_evidence` are authoritative implementation evidence.
+Never strengthen a source-plan criterion with an unrequested protocol or
+transport constraint. Retrieved audit documents can be stale and must never
+override these live records.
 
 1. Every `done_when` condition and acceptance criterion — evidence must be in
    the diff or the check results.
