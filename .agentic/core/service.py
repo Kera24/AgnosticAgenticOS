@@ -21,6 +21,7 @@ import sys
 import time
 
 from . import config as config_mod
+from . import execpolicy
 from .registry import runtime_home
 
 DEFAULT_PORT = 8765
@@ -109,8 +110,9 @@ def default_spawner(port, home):
             "--no-open", "--port", str(port)]
     flags = 0
     if os.name == "nt":
-        flags = subprocess.DETACHED_PROCESS | \
-            subprocess.CREATE_NEW_PROCESS_GROUP
+        flags = execpolicy.windows_background_creationflags(
+            subprocess.DETACHED_PROCESS |
+            subprocess.CREATE_NEW_PROCESS_GROUP)
     child_env = os.environ.copy()
     child_env["AGENTIC_SERVICE_MODE"] = "1"
     proc = subprocess.Popen(argv, stdout=log, stderr=log,
@@ -121,8 +123,10 @@ def default_spawner(port, home):
 
 def default_terminator(pid):
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                       capture_output=True)
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            creationflags=execpolicy.windows_background_creationflags())
     else:
         import signal
         try:
