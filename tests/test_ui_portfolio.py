@@ -92,6 +92,44 @@ def test_portfolio_lifecycle_actions_and_confirmations(ui_client):
                           json={}).status_code == 404
 
 
+
+def test_portfolio_start_uses_registered_project_overlay(ui_client,
+                                                         monkeypatch):
+    record = add_app_folder(ui_client)
+    pid = record["id"]
+    ui_client.post("/api/v1/portfolio/%s/init" % pid, json={})
+    captured = {}
+
+    import core.project as project_mod
+
+    def fake_start(cfg, plan, **kw):
+        captured["project_dir"] = cfg["runtime"]["project_dir"]
+        captured["root"] = str(cfg["runtime"]["root"])
+        captured["plan"] = plan
+        return {"status": "started"}
+
+    monkeypatch.setattr(project_mod, "project_start", fake_start)
+    response = ui_client.post("/api/v1/portfolio/%s/start" % pid, json={})
+    assert response.status_code == 200, response.text
+    operation = response.json()
+    assert operation["kind"] == "portfolio.project.start"
+
+    import time
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        current = ui_client.get(
+            "/api/v1/operations/%s" % operation["id"]).json()
+        if current["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert current["status"] == "succeeded"
+    assert captured["root"] == record["root_path"]
+    assert captured["plan"] == str(
+        ui_client.tmp / "apps" / "demo-app" / "plan.md")
+    assert pid in captured["project_dir"]
+
+
+
 def test_portfolio_doctor_and_pause(ui_client):
     pid = add_app_folder(ui_client)["id"]
     ui_client.post("/api/v1/portfolio/%s/init" % pid, json={})
