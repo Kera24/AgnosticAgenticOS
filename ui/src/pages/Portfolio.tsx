@@ -40,6 +40,18 @@ type Project = {
   supabase: { detected: boolean; project_ref: string | null };
   code_index: { provider?: string; files_indexed?: number } | null;
   runtime_dir: string;
+  final_audit: {
+    complete: boolean;
+    failed_checks: string[];
+    failure_details: {
+      check: string;
+      name: string;
+      command: string | null;
+      exit_code: number | null;
+      kind: string;
+      detail: string;
+    }[];
+  } | null;
 };
 
 type PortfolioView = {
@@ -232,7 +244,9 @@ export function Portfolio() {
                     />
                   </td>
                   <td style={{ maxWidth: 260 }}>
-                    {waitingByProject.get(p.id) ?? p.waiting_reason}
+                    {p.final_audit?.failure_details?.length
+                      ? p.waiting_reason
+                      : waitingByProject.get(p.id) ?? p.waiting_reason}
                   </td>
                   <td>
                     <BackendChip name={p.scheduler.selected_backend} />
@@ -328,6 +342,19 @@ export function Portfolio() {
                        .join(" ")
                    : "not started"],
                 ["runtime state", selected.runtime_dir],
+                ["final audit",
+                 selected.final_audit
+                   ? selected.final_audit.complete
+                     ? "passed"
+                     : `failed: ${selected.final_audit.failed_checks.join(", ")}`
+                   : "not run"],
+                ["audit evidence",
+                 selected.final_audit?.failure_details?.length
+                   ? selected.final_audit.failure_details
+                       .map((failure) =>
+                         `${failure.name}: ${failure.detail}`)
+                       .join(" | ")
+                   : "none"],
               ]}
             />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
