@@ -42,6 +42,8 @@ import threading
 import time
 import uuid
 
+from . import execpolicy
+
 _local = threading.local()
 
 SUPERVISOR_STARTING = "starting"
@@ -221,8 +223,10 @@ def _force_kill_tree_by_pid(pid):
     group."""
     if _IS_WINDOWS:
         try:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                          capture_output=True, text=True, timeout=20)
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True, text=True, timeout=20,
+                creationflags=execpolicy.windows_background_creationflags())
         except Exception:   # noqa: BLE001
             pass
         return
@@ -360,7 +364,9 @@ def run_supervised(argv, cwd, timeout, env=None, stdin_text=None,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         text=True, encoding="utf-8", errors="replace")
     if _IS_WINDOWS:
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        popen_kwargs["creationflags"] = \
+            execpolicy.windows_background_creationflags(
+                subprocess.CREATE_NEW_PROCESS_GROUP)
     else:
         popen_kwargs["start_new_session"] = True
 
