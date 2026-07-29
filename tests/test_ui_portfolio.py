@@ -61,6 +61,34 @@ def test_portfolio_add_and_snapshot(ui_client):
     assert "api_key" not in json.dumps(snap).lower()
 
 
+
+def test_portfolio_exposes_final_audit_failure_evidence(ui_client):
+    record = add_app_folder(ui_client)
+    pid = record["id"]
+    ui_client.post("/api/v1/portfolio/%s/init" % pid, json={})
+    project = ui_client.get("/api/v1/portfolio").json()["projects"][0]
+    audit_path = os.path.join(
+        project["runtime_dir"], "project", "final-audit.yaml")
+    with open(audit_path, "w", encoding="utf-8") as fh:
+        json.dump({
+            "complete": False,
+            "checks": {"local_browser_smoke": False},
+            "failure_details": [{
+                "check": "local_browser_smoke",
+                "name": "local-static-app-smoke",
+                "detail": "index.html has no application root",
+            }],
+        }, fh)
+
+    project = ui_client.get("/api/v1/portfolio").json()["projects"][0]
+
+    assert project["final_audit"]["complete"] is False
+    assert project["final_audit"]["failed_checks"] == [
+        "local_browser_smoke"]
+    assert project["final_audit"]["failure_details"][0]["detail"] == \
+        "index.html has no application root"
+
+
 def test_portfolio_add_rejects_bad_paths(ui_client):
     r = ui_client.post("/api/v1/portfolio/add",
                        json={"name": "ghost",
