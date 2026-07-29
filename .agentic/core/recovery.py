@@ -8,6 +8,7 @@ blocker had no path back to health short of hand-editing state files.
 now runs; every stage returns a structured result, even when it finds
 nothing to do, so a caller can always see exactly what was (or wasn't)
 recovered."""
+import datetime as _dt
 import glob
 import json
 import os
@@ -752,7 +753,7 @@ def _task_state_reconciliation(agentic_dir):
                         str(blocker.get("reason") or "").startswith(
                             "file ownership overlap:"):
                     blocker["resolved"] = True
-                    blocker["resolved_at"] = _iso(_now())
+                    blocker["resolved_at"] = _dt.datetime.now().isoformat(timespec="seconds")
                     resolved += 1
                     changed = True
             projstate.update_task(
