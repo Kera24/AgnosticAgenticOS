@@ -1679,6 +1679,9 @@ def _final_audit_failure_details(checks, gate_result, dirty_paths=None,
         "backlog_complete": "project backlog is not complete",
         "all_milestones_done": "one or more milestones are not done",
         "no_open_blockers": "one or more project blockers remain open",
+        "local_browser_smoke": "local browser smoke check failed",
+        "deterministic_checks_pass":
+            "one or more mandatory deterministic checks failed",
         "no_uncommitted_changes":
             "uncommitted project changes remain: %s" %
             ", ".join((dirty_paths or [])[:20]),
@@ -1688,7 +1691,8 @@ def _final_audit_failure_details(checks, gate_result, dirty_paths=None,
             "environment variables are used but .env.example is missing",
         "completion_contract_verified":
             "completion contract has unverified requirements: %s" %
-            ", ".join((completion_contract or {}).get("unverified", [])[:20]),
+            ", ".join(str(item) for item in
+                      (completion_contract or {}).get("unverified", [])[:20]),
         "final_independent_review":
             ("independent reviewer did not return a passing verdict"
              if not review else
