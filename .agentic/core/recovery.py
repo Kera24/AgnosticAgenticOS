@@ -706,18 +706,66 @@ def recover_stale_task_integration_blocker(agentic_dir, root, scheduler):
 # -- 6. task-state reconciliation -----------------------------------------------
 
 def _task_state_reconciliation(agentic_dir):
-    """A task left `in_progress` with no active file-ownership claim is
-    unambiguously stuck (every normal exit path -- success, `fail()`,
-    stale-owned-process recovery -- releases the claim before the run
-    ends): reset it to pending so the next cycle can pick it up again."""
+    """Repair task/ownership state after interrupted or legacy cycles.
+
+    Besides resetting claim-less in-progress tasks, release claims owned by
+    tasks already marked done. If such a stale claim produced an ownership
+    blocker for a dependent task, resolve that platform blocker and retry it.
+    """
     backlog = projstate.load_backlog(agentic_dir)
     claims = taskspace.active_claims(agentic_dir)
+    by_id = {task["id"]: task for task in backlog}
     reconciled = []
+
+    stale_done = {task_id for task_id in claims
+                  if by_id.get(task_id, {}).get("status") == "done"}
+    for task_id in sorted(stale_done):
+        taskspace.release_claim(agentic_dir, task_id)
+        reconciled.append({
+            "task_id": task_id,
+            "action": "release_done_task_ownership_claim",
+        })
+
     for task in backlog:
         if task["status"] == "in_progress" and task["id"] not in claims:
             projstate.update_task(agentic_dir, task["id"], status="pending")
             reconciled.append({"task_id": task["id"],
                                "action": "reset_in_progress_to_pending"})
+
+    if stale_done:
+        blockers_doc = projstate.read_yaml(
+            agentic_dir, "blockers.yaml", {"blockers": []}) or {
+                "blockers": []}
+        changed = False
+        for task in backlog:
+            reason = str(task.get("blocking_reason") or "")
+            match = re.match(
+                r"^file ownership overlap: task ([^ ]+) already claims ",
+                reason)
+            if task.get("status") != "blocked" or not match or \
+                    match.group(1) not in stale_done:
+                continue
+            resolved = 0
+            for blocker in blockers_doc.get("blockers", []):
+                if blocker.get("task") == task["id"] and \
+                        not blocker.get("resolved") and \
+                        str(blocker.get("reason") or "").startswith(
+                            "file ownership overlap:"):
+                    blocker["resolved"] = True
+                    blocker["resolved_at"] = _iso(_now())
+                    resolved += 1
+                    changed = True
+            projstate.update_task(
+                agentic_dir, task["id"], status="pending",
+                blocking_reason=None, last_result=None)
+            reconciled.append({
+                "task_id": task["id"],
+                "action": "reset_stale_ownership_blocker",
+                "resolved_blockers": resolved,
+                "former_owner": match.group(1),
+            })
+        if changed:
+            projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
     return reconciled
 
 
