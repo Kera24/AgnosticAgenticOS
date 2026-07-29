@@ -52,28 +52,32 @@ ROLES = [
 AI_ROLE_IDS = [r["id"] for r in ROLES if r["ai"]]
 
 
-def _agentic():
+def _agentic(cfg=None):
+    if cfg is not None:
+        runtime = cfg.get("runtime") or {}
+        if runtime.get("project_dir"):
+            return str(runtime["project_dir"])
     return str(config_mod.AGENTIC_DIR)
 
 
-def _memory():
-    return os.path.join(_agentic(), "memory")
+def _memory(cfg=None):
+    return os.path.join(_agentic(cfg), "memory")
 
 
-def _runs_dir():
-    return os.path.join(_agentic(), "runs")
+def _runs_dir(cfg=None):
+    return os.path.join(_agentic(cfg), "runs")
 
 
-def _worktree_path():
-    return os.path.join(_agentic(), "worktrees", "project")
+def _worktree_path(cfg=None):
+    return os.path.join(_agentic(cfg), "worktrees", "project")
 
 
 # -- project ------------------------------------------------------------------
 
 def project_snapshot(cfg):
-    a = _agentic()
+    a = _agentic(cfg)
     exists = projstate.exists(a)
-    scheduler = Scheduler(cfg, _memory())
+    scheduler = Scheduler(cfg, _memory(cfg))
     snap = {
         "exists": exists,
         "name": (cfg.get("project") or {}).get("name"),
@@ -82,9 +86,9 @@ def project_snapshot(cfg):
         "progress": {}, "blockers": [], "human_blockers": [],
         "milestones": [], "backlog_summary": {}, "next_task": None,
         "branch": PROJECT_BRANCH,
-        "worktree": _worktree_path(),
+        "worktree": _worktree_path(cfg),
         "worktree_exists": os.path.exists(
-            os.path.join(_worktree_path(), ".git")),
+            os.path.join(_worktree_path(cfg), ".git")),
         "repository_root": str(config_mod.repo_root(cfg)),
         "final_audit": None,
         "human_decisions": [],
@@ -120,14 +124,14 @@ def _public_task(task):
 
 
 def backlog(cfg):
-    a = _agentic()
+    a = _agentic(cfg)
     if not projstate.exists(a):
         return []
     return [_public_task(t) for t in projstate.load_backlog(a)]
 
 
 def plan_documents(cfg):
-    a = _agentic()
+    a = _agentic(cfg)
     out = {}
     for key, name in (("plan", "PROJECT.md"),
                       ("architecture", "architecture.md")):
@@ -153,7 +157,7 @@ def _routing_chain_safe(cfg, role):
 
 
 def agents_snapshot(cfg):
-    ledger = CapacityLedger(cfg, _memory())
+    ledger = CapacityLedger(cfg, _memory(cfg))
     rows = ledger._rows(ledger.calls_path, CALL_COLUMNS)
     by_role = {}
     for row in rows:
@@ -197,7 +201,7 @@ def backends_snapshot(cfg, detected, apis):
     """Combine configured backends, detection results (may be cached), the
     circuit-breaker board and routing assignments. Auth status is whatever
     the CLI itself reports — `unknown` is NEVER treated as authenticated."""
-    board = BreakerBoard(_memory())
+    board = BreakerBoard(_memory(cfg))
     routing = cfg.get("routing") or {}
     assigned = {}
     for role_id in AI_ROLE_IDS:
@@ -259,9 +263,9 @@ def backends_snapshot(cfg, detected, apis):
 # -- capacity ----------------------------------------------------------------------
 
 def capacity_snapshot(cfg):
-    a = _agentic()
-    ledger = CapacityLedger(cfg, _memory())
-    board = BreakerBoard(_memory())
+    a = _agentic(cfg)
+    ledger = CapacityLedger(cfg, _memory(cfg))
+    board = BreakerBoard(_memory(cfg))
     task = projstate.next_task(a) if projstate.exists(a) else None
     routing = cfg.get("routing") or {}
     chain = ([routing["primary"]] + list(routing.get("fallbacks") or [])
@@ -347,13 +351,13 @@ def _capacity_events(limit=25):
 # -- verification -----------------------------------------------------------------
 
 def verification_snapshot(cfg):
-    a = _agentic()
+    a = _agentic(cfg)
     workdir = _worktree_path() if os.path.exists(_worktree_path()) \
         else str(config_mod.repo_root(cfg))
     commands, auto = gate.resolve_commands(cfg, workdir)
     baseline = gate.load_baseline(a)
-    latest = _latest_check_results()
-    verdicts = _recent_verdicts()
+    latest = _latest_check_results(cfg)
+    verdicts = _recent_verdicts(cfg)
     known_failing = {name for name, passed in
                      ((baseline or {}).get("checks") or {}).items()
                      if passed is False}
@@ -376,8 +380,8 @@ def verification_snapshot(cfg):
     }
 
 
-def _latest_check_results():
-    runs = _runs_dir()
+def _latest_check_results(cfg=None):
+    runs = _runs_dir(cfg)
     if not os.path.isdir(runs):
         return {"run": None, "results": []}
     cycles = sorted((d for d in os.listdir(runs)
@@ -432,9 +436,9 @@ def _parse_check_logs(log_dir, run, sub):
     return results
 
 
-def _recent_verdicts():
+def _recent_verdicts(cfg=None):
     out = {}
-    for entry in activity_entries(limit=800):
+    for entry in activity_entries(limit=800, cfg=cfg):
         if entry.get("event") in ("qa_review", "security_review"):
             out[entry["event"]] = entry
     return out
@@ -442,10 +446,10 @@ def _recent_verdicts():
 
 # -- activity -----------------------------------------------------------------------
 
-def activity_entries(limit=300):
+def activity_entries(limit=300, cfg=None):
     """Tail of decisions.jsonl (already redacted at write time; redacted
     again on malformed lines as defence in depth)."""
-    path = os.path.join(_memory(), "decisions.jsonl")
+    path = os.path.join(_memory(cfg), "decisions.jsonl")
     if not os.path.exists(path):
         return []
     entries = []
@@ -476,7 +480,7 @@ class LogAccessError(Exception):
     pass
 
 
-def read_run_log(run, name):
+def read_run_log(run, name, cfg=None):
     """Read one check log from .agentic/runs/<run>/(checks-*/)?<name>.log.
     Both parts are validated against a strict charset and the resolved path
     must stay inside the runs directory — no arbitrary filesystem access."""
@@ -486,7 +490,7 @@ def read_run_log(run, name):
         raise LogAccessError("invalid run or log name")
     if ".." in run or ".." in name:
         raise LogAccessError("invalid run or log name")
-    runs = os.path.realpath(_runs_dir())
+    runs = os.path.realpath(_runs_dir(cfg))
     base = os.path.realpath(os.path.join(runs, run))
     if not (base == runs or base.startswith(runs + os.sep)) or \
             not os.path.isdir(base):
