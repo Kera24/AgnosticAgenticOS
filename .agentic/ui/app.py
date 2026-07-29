@@ -516,7 +516,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         confirm: bool = False
 
     DESTRUCTIVE_PROJECT_ACTIONS = {"archive", "remove", "stop"}
-    PROJECT_ACTIONS = {"init", "doctor", "pause", "resume", "stop",
+    PROJECT_ACTIONS = {"init", "start", "doctor", "pause", "resume", "stop",
                        "enable", "archive", "remove"}
 
     @app.get(API + "/portfolio")
@@ -545,6 +545,34 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         if action in DESTRUCTIVE_PROJECT_ACTIONS and not body.confirm:
             raise HTTPException(422, "confirmation required for %s"
                                 % action)
+        if action == "start":
+            from core import projectops, projstate
+            from core.project import project_start
+            from core.registry import ProjectRegistry
+            registry = ProjectRegistry()
+            try:
+                record = registry.get(project_id[:64])
+            except RegistryError as exc:
+                raise HTTPException(404, str(exc.detail
+                                             if hasattr(exc, "detail")
+                                             else exc))
+            project_cfg = projectops.project_cfg_for(cfg(), registry, record)
+            state_dir = project_cfg["runtime"]["project_dir"]
+            if projstate.exists(state_dir):
+                raise HTTPException(409, "project already started")
+            plan = projectops.find_plan(record)
+            if not plan:
+                raise HTTPException(422, "no plan file found for project")
+            registry.update(project_id[:64], enabled=True)
+            audit("ui_portfolio_project_start", project=project_id[:64],
+                  plan=record.get("plan_path"))
+
+            def runner():
+                return project_start(project_cfg, plan)
+
+            return _start_operation(
+                "portfolio.project.start", runner,
+                detail="architecting %s" % project_id[:64])
         try:
             result = portfolio_mod.project_action(cfg(), project_id[:64],
                                                   action)
