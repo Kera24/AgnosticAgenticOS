@@ -31,14 +31,36 @@ def test_local_static_app_smoke_serves_mount_and_local_asset_graph(tmp_path):
     assert "src/components/task-form.html" in result["detail"]
 
 
-def test_local_static_app_smoke_fails_when_mount_is_missing(tmp_path):
+def test_local_static_app_smoke_accepts_non_empty_semantic_main(tmp_path):
+    _write(tmp_path / "index.html", """
+        <main><h1>Tip Calculator</h1></main>
+        <script src="app.js"></script>
+    """)
+    _write(tmp_path / "app.js", "console.log('ok')")
+
+    result = gate.run_local_static_app_smoke(str(tmp_path))
+
+    assert result["passed"] is True
+    assert "application root present" in result["detail"]
+
+
+def test_local_static_app_smoke_fails_when_application_root_is_missing(tmp_path):
     _write(tmp_path / "index.html", "<script src='app.js'></script>")
     _write(tmp_path / "app.js", "console.log('ok')")
 
     result = gate.run_local_static_app_smoke(str(tmp_path))
 
     assert result["passed"] is False
-    assert "no #app mount" in result["detail"]
+    assert "neither #app mount nor non-empty <main> root" in result["detail"]
+
+
+def test_local_static_app_smoke_rejects_empty_semantic_main(tmp_path):
+    _write(tmp_path / "index.html", "<main><!-- placeholder --></main>")
+
+    result = gate.run_local_static_app_smoke(str(tmp_path))
+
+    assert result["passed"] is False
+    assert "neither #app mount nor non-empty <main> root" in result["detail"]
 
 
 def test_local_static_app_smoke_fails_when_local_asset_is_missing(tmp_path):
