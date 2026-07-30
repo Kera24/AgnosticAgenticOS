@@ -163,3 +163,36 @@ def test_status_preserves_project_scope(tmp_path):
     assert status["project_id"] == "project-a"
     assert status["canary_selected"] is True
     assert status["active"] is True
+
+
+
+def test_runtime_canary_promotion_selects_only_target_project(tmp_path):
+    registry = FeatureGateRegistry(tmp_path, _cfg("shadow"))
+    gate = registry.decision("contract_amendments", "project-a")
+    registry.begin_run("shadow-1", {"contract_amendments": gate})
+    registry.record_outcome("shadow-1", "success")
+
+    promoted = registry.promote(
+        "contract_amendments", "canary", minimum_successes=1,
+        project_id="project-a")
+
+    assert promoted["effective_state"] == "canary"
+    assert promoted["active"] is True
+    assert promoted["canary_projects"] == ["project-a"]
+    assert registry.decision(
+        "contract_amendments", "other-project")["active"] is False
+
+    reloaded = FeatureGateRegistry(tmp_path, _cfg("shadow"))
+    assert reloaded.decision(
+        "contract_amendments", "project-a")["active"] is True
+
+
+def test_canary_promotion_requires_explicit_project_scope(tmp_path):
+    registry = FeatureGateRegistry(tmp_path, _cfg("shadow"))
+    gate = registry.decision("contract_amendments", "project-a")
+    registry.begin_run("shadow-1", {"contract_amendments": gate})
+    registry.record_outcome("shadow-1", "success")
+
+    with pytest.raises(ValueError, match="requires a project id"):
+        registry.promote(
+            "contract_amendments", "canary", minimum_successes=1)
