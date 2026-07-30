@@ -256,3 +256,33 @@ def test_authorized_amendment_flows_through_complete_cycle(sandbox):
     assert os.path.exists(os.path.join(
         project_worktree, "generated", "report.json"))
     assert not os.path.exists(os.path.join(project_worktree, ".env"))
+
+
+def test_architect_schema_preserves_bounded_amendment_policy():
+    schema_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        ".agentic", "schemas", "architect.schema.json")
+    with open(schema_path, encoding="utf-8") as handle:
+        schema = json.load(handle)
+
+    task_properties = schema["properties"]["backlog"]["items"]["properties"]
+    policy = task_properties["contract_amendment_policy"]
+    assert policy["additionalProperties"] is False
+    assert policy["required"] == ["enabled", "allowed_kinds"]
+    assert set(policy["properties"]["allowed_kinds"]["items"]["enum"]) == {
+        "required_output", "allowed_path",
+        "deterministic_check", "acceptance_criterion",
+    }
+
+
+def test_architect_prompt_requires_explicit_plan_authority_for_policy():
+    prompt_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        ".agentic", "prompts", "architect.md")
+    with open(prompt_path, encoding="utf-8") as handle:
+        prompt = handle.read()
+
+    assert "OMIT by default" in prompt
+    assert "source plan explicitly declares" in prompt
+    assert "preferred low-risk shadow/canary probe" in prompt
+    assert "never use it to weaken, remove, or replace" in prompt
