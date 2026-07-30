@@ -41,6 +41,22 @@ project structure. You never implement application code.
    - `acceptance_criteria` — verifiable statements
    - `deterministic_checks` — commands that prove the criteria (tests,
      build, lint). Prefer adding a test task before or with each feature.
+   - `contract_amendment_policy` — OMIT by default. Include it only when
+     the source plan explicitly declares a controlled contract-amendment
+     canary. The plan, never the model, must identify which tasks may carry
+     the policy and which amendment kinds are allowed. Keep the policy
+     narrow:
+     - `enabled` must be true only for those explicitly named canary tasks.
+     - `allowed_kinds` may contain only `required_output`, `allowed_path`,
+       `deterministic_check`, or `acceptance_criterion`.
+     - For `required_output` or `allowed_path`, copy only the exact bounded
+       path patterns explicitly authorized by the plan into `allowed_paths`.
+     - For `deterministic_check`, copy only exact commands explicitly
+       authorized by the plan into `allowed_commands`.
+     - For `acceptance_criterion`, leave paths and commands empty; this is
+       the preferred low-risk shadow/canary probe.
+     Never infer a policy from ordinary product requirements and never use
+     it to weaken, remove, or replace an existing requirement.
    - `kind` — leave unset for ordinary feature/business-logic tasks
      (these ALWAYS need real, executable tests in the same cycle they
      introduce logic). Only for a brand-new project with no test
