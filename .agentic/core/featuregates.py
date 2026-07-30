@@ -53,8 +53,10 @@ class FeatureGateRegistry:
             "override_state": None,
             "last_rollback_reason": None,
             "runtime_canary_projects": [],
+            "override_source": None,
         })
         record.setdefault("runtime_canary_projects", [])
+        record.setdefault("override_source", None)
         return record
 
     def decision(self, name, project_id=None):
@@ -79,8 +81,13 @@ class FeatureGateRegistry:
             "canary_selected": canary_selected,
             "active": active,
             "observe_only": state == "shadow",
-            "source": ("runtime_rollback" if record.get("override_state")
-                       else "configuration"),
+            "source": (
+                "runtime_rollback"
+                if record.get("override_state") and
+                record.get("override_source") == "rollback"
+                else "runtime_promotion"
+                if record.get("override_state")
+                else "configuration"),
         }
 
     def begin_run(self, run_id, decisions):
@@ -108,6 +115,7 @@ class FeatureGateRegistry:
                 record["platform_failures"] += 1
                 if decision.get("effective_state") == "canary":
                     record["override_state"] = "shadow"
+                    record["override_source"] = "rollback"
                     record["rollback_count"] += 1
                     record["last_rollback_reason"] = str(detail or outcome)[:300]
                     events.append({
@@ -136,6 +144,7 @@ class FeatureGateRegistry:
                 "insufficient successful evidence for %s: %s < %s"
                 % (name, record.get("successes", 0), minimum_successes))
         record["override_state"] = target_state
+        record["override_source"] = "promotion"
         if target_state == "canary" and project_id not in \
                 record["runtime_canary_projects"]:
             record["runtime_canary_projects"].append(project_id)
