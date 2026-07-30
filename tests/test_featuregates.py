@@ -178,6 +178,7 @@ def test_runtime_canary_promotion_selects_only_target_project(tmp_path):
 
     assert promoted["effective_state"] == "canary"
     assert promoted["active"] is True
+    assert promoted["source"] == "runtime_promotion"
     assert promoted["canary_projects"] == ["project-a"]
     assert registry.decision(
         "contract_amendments", "other-project")["active"] is False
