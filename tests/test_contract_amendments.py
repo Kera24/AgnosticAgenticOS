@@ -285,4 +285,5 @@ def test_architect_prompt_requires_explicit_plan_authority_for_policy():
     assert "OMIT by default" in prompt
     assert "source plan explicitly declares" in prompt
     assert "preferred low-risk shadow/canary probe" in prompt
-    assert "never use it to weaken, remove, or replace" in prompt
+    normalized_prompt = " ".join(prompt.split())
+    assert "never use it to weaken, remove, or replace" in normalized_prompt
