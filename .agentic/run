@@ -1439,7 +1439,8 @@ def cmd_features(cfg, args):
         minimum = int(feature_cfg.get("promotion_min_successes", 1))
         try:
             decision = gates.promote(
-                feature, target, minimum_successes=minimum)
+                feature, target, minimum_successes=minimum,
+                project_id=project_id)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
