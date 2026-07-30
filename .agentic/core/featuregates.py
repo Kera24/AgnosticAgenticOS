@@ -52,7 +52,9 @@ class FeatureGateRegistry:
             "rollback_count": 0,
             "override_state": None,
             "last_rollback_reason": None,
+            "runtime_canary_projects": [],
         })
+        record.setdefault("runtime_canary_projects", [])
         return record
 
     def decision(self, name, project_id=None):
@@ -62,7 +64,8 @@ class FeatureGateRegistry:
             configured = DEFAULT_STATE
         record = self._record(name)
         state = record.get("override_state") or configured
-        projects = list(config.get("canary_projects") or [])
+        projects = sorted(set(config.get("canary_projects") or []) |
+                          set(record.get("runtime_canary_projects") or []))
         canary_selected = (
             state != "canary" or
             bool(project_id and project_id in projects))
@@ -120,19 +123,25 @@ class FeatureGateRegistry:
         self._save()
         return events
 
-    def promote(self, name, target_state, minimum_successes=1):
+    def promote(self, name, target_state, minimum_successes=1,
+                project_id=None):
         if target_state not in STATES:
             raise ValueError("unsupported feature state: %s" % target_state)
         record = self._record(name)
+        if target_state == "canary" and not project_id:
+            raise ValueError("canary promotion requires a project id")
         if target_state in ("canary", "stable") and \
                 record.get("successes", 0) < int(minimum_successes):
             raise ValueError(
                 "insufficient successful evidence for %s: %s < %s"
                 % (name, record.get("successes", 0), minimum_successes))
         record["override_state"] = target_state
+        if target_state == "canary" and project_id not in \
+                record["runtime_canary_projects"]:
+            record["runtime_canary_projects"].append(project_id)
         record["last_rollback_reason"] = None
         self._save()
-        return self.decision(name)
+        return self.decision(name, project_id=project_id)
 
     def status(self, name, project_id=None):
         return dict(
