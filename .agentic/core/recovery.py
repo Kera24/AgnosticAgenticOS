@@ -226,6 +226,99 @@ def recover_windows_command_resolution_blocker(agentic_dir, cfg):
 
 
 
+# -- fixed language-neutral tests-directory autodetection blocker -------------
+
+def _foreign_pytest_autodetection_evidence(agentic_dir, task_id):
+    """Find a cycle where pytest was inferred solely for a non-Python task."""
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                task_contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if task_contract.get("task_id") != task_id:
+            continue
+        required = " ".join(str(c) for c in
+                            task_contract.get("deterministic_checks") or [])
+        if "pytest" in required.lower():
+            return None
+        for path in sorted(glob.glob(
+                os.path.join(cycle_dir, "validation-result-*.json"))):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if not validation.get("auto_detected"):
+                continue
+            for result in validation.get("results") or []:
+                if str(result.get("name") or "").lower() != "pytest":
+                    continue
+                detail = str(result.get("detail") or "").lower()
+                if result.get("exit_code") == 5 and "no tests ran" in detail:
+                    return {
+                        "run_id": task_contract.get("run_id") or
+                                  os.path.basename(cycle_dir).replace(
+                                      "cycle-", "", 1),
+                        "evidence_ref": path,
+                    }
+        return None
+    return None
+
+
+def recover_foreign_pytest_autodetection_blocker(
+        agentic_dir, root=None, evidence_id="recovery"):
+    """Reset a task blocked by the fixed tests/-means-pytest detection bug."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked":
+            continue
+        evidence = _foreign_pytest_autodetection_evidence(
+            agentic_dir, task["id"])
+        if not evidence:
+            continue
+        archived = None
+        task_git = os.path.join(
+            str(agentic_dir), "worktrees", "tasks", task["id"], ".git")
+        if root and os.path.exists(task_git):
+            archived = taskspace.archive_and_reset_task_worktree(
+                root, agentic_dir, task["id"],
+                evidence_id or evidence["run_id"])
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "foreign_test_framework_autodetected",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_foreign_pytest_autodetection_blocker",
+            "resolved_blockers": resolved,
+            "archived_branch": archived and archived.get("archived_branch"),
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
 # -- fixed omission of canonical task-specific deterministic checks ------------
 
 _QA_MISSING_TASK_GATE_RE = re.compile(
@@ -925,6 +1018,9 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         evidence_id=scheduler.state.get("current_cycle") or "recovery")
     stale_source_events = recover_stale_filter_source_blocker(
         agentic_dir, root, scheduler)
+    foreign_pytest_events = recover_foreign_pytest_autodetection_blocker(
+        agentic_dir, root=root,
+        evidence_id=scheduler.state.get("current_cycle") or "recovery")
     read_check_events = recover_platform_neutral_read_blocker(agentic_dir)
     secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
     integration_events = recover_stale_task_integration_blocker(
@@ -942,7 +1038,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         agentic_dir)
     for event in (windows_command_events + task_gate_events +
                   qa_evidence_events + stale_source_events +
-                  read_check_events):
+                  foreign_pytest_events + read_check_events):
         action = event.get("action")
         if action == "reset_windows_command_resolution_blocker":
             failure_class = "platform_capability_missing"
@@ -952,6 +1048,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
             failure_class = "stale_recovered_task_worktree"
         elif action == "reset_platform_neutral_read_check_blocker":
             failure_class = "legacy_unix_only_read_check"
+        elif action == "reset_foreign_pytest_autodetection_blocker":
+            failure_class = "foreign_test_framework_autodetected"
         else:
             failure_class = "task_contract_invalid"
         logs.decision(memory_dir, {
@@ -980,7 +1078,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         [e for e in aggregate_events if e.get("recovered")] +
         contract_events + windows_codex_events + windows_command_events +
         task_gate_events + qa_evidence_events + stale_source_events +
-        read_check_events + secret_scan_events + integration_events +
+        foreign_pytest_events + read_check_events + secret_scan_events +
+        integration_events +
         plan_fidelity_events)
 
     stages["task_state_reconciliation"] = _stage(
