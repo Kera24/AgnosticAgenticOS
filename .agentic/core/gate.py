@@ -228,12 +228,31 @@ def classify_check_kind(name, command):
                           # has always meant "the test suite" unless labeled
 
 
+def _contains_python_tests(repo_root):
+    """Return true only when tests/ contains Python test source.
+
+    A directory named tests is language-neutral: Node, Go, Rust, and browser
+    projects commonly use it. Treating the directory alone as pytest evidence
+    injects a foreign mandatory check into otherwise valid projects.
+    """
+    tests_root = os.path.join(repo_root, "tests")
+    if not os.path.isdir(tests_root):
+        return False
+    for current, dirs, files in os.walk(tests_root):
+        dirs[:] = [d for d in dirs if d not in {
+            "__pycache__", "node_modules", ".git",
+        }]
+        if any(name.endswith(".py") for name in files):
+            return True
+    return False
+
+
 def detect_commands(repo_root):
     """Best-effort autodetection of repository checks."""
     commands = []
     exists = lambda *p: os.path.exists(os.path.join(repo_root, *p))
     if (exists("pyproject.toml") or exists("pytest.ini") or exists("setup.cfg")
-            or exists("tests")):
+            or _contains_python_tests(repo_root)):
         commands.append({"name": "pytest", "command": "python -m pytest -q",
                          "mandatory": True, "kind": "test_suite"})
     if exists("package.json"):
