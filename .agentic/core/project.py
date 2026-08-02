@@ -694,6 +694,14 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     if kind == "timeout" else None)
     proposed_order = conducted["structured_output"]
     _persist_evidence(run_dir, "conductor-work-order.json", proposed_order)
+    amendment_policy = task.get("contract_amendment_policy") or {}
+    if amendment_gate.get("observe_only") and \
+            amendment_policy.get("enabled") is True and \
+            not proposed_order.get("contract_amendments"):
+        return fail(
+            "failure",
+            "conductor omitted required shadow contract-amendment probe",
+            failure_class=failures.MODEL_OUTPUT_INVALID)
     feature_registry.begin_run(
         run_id, {"contract_amendments": amendment_gate}
         if proposed_order.get("contract_amendments") else {})
