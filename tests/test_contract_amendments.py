@@ -4,7 +4,7 @@ import os
 
 from conftest import (Clock, FakeCaller, project_cfg, proj_order, seed_project,
                       simple_task, verifier_out, worker_out)
-from core import contract
+from core import contract, projstate
 from core.featuregates import FeatureGateRegistry
 from core.project import run_cycle
 
@@ -287,3 +287,44 @@ def test_architect_prompt_requires_explicit_plan_authority_for_policy():
     assert "preferred low-risk shadow/canary probe" in prompt
     normalized_prompt = " ".join(prompt.split())
     assert "never use it to weaken, remove, or replace" in normalized_prompt
+
+
+def test_conductor_prompt_requires_one_enabled_shadow_probe():
+    prompt_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        ".agentic", "prompts", "project-conductor.md")
+    with open(prompt_path, encoding="utf-8") as handle:
+        prompt = " ".join(handle.read().split())
+
+    assert "shadow mode" in prompt
+    assert "MUST emit exactly one conservative proposal" in prompt
+    assert "required observation probe" in prompt
+
+
+def test_cycle_rejects_missing_required_shadow_probe_before_coder(sandbox):
+    cfg = project_cfg(sandbox)
+    cfg["advanced_features"] = {
+        "contract_amendments": {
+            "state": "shadow",
+            "promotion_min_successes": 3,
+        }}
+    task = simple_task(
+        "t-shadow-probe",
+        contract_amendment_policy={
+            "enabled": True,
+            "allowed_kinds": ["acceptance_criterion"],
+            "allowed_paths": [],
+            "allowed_commands": [],
+        })
+    seed_project(sandbox, [task])
+    caller = FakeCaller({"conductor": proj_order(task)})
+
+    result = run_cycle(cfg, caller=caller, clock=Clock())
+
+    assert result["status"] == "failure"
+    assert result["detail"] == (
+        "conductor omitted required shadow contract-amendment probe")
+    assert [call for call in caller.calls if call["role"] == "coder"] == []
+    current = {item["id"]: item for item in projstate.load_backlog(
+        str(sandbox["agentic"]))}
+    assert current[task["id"]]["status"] == "pending"
