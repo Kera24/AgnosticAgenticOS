@@ -534,3 +534,100 @@ def test_merge_conflict_cycle_is_platform_failure_for_streak_recovery():
         "integration failed: merge conflict integrating task "
         "t5-task-list-renderer; task worktree preserved as evidence")
     assert recovery._is_legacy_platform_cycle_detail(detail)
+
+
+
+def _seed_line_budget_blocker(sandbox, mixed=False):
+    task = simple_task(
+        "t3-converter-interface", expected_size="medium",
+        expected_paths=["index.html", "src/**", "tests/**"])
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = (
+        "parallel candidates exhausted: all 2 candidate(s) disqualified "
+        "(candidate 1 and candidate 2 exceeded line budget)")
+    failures = []
+    for index, actual in enumerate((430, 489), 1):
+        candidate_id = task["id"] if index == 1 else task["id"] + "--c2"
+        worktree = sandbox["agentic"] / "worktrees" / "tasks" / candidate_id
+        (worktree / ".git").mkdir(parents=True)
+        failures.append({
+            "candidate_id": candidate_id,
+            "failure_class": "model_output_invalid",
+            "code": ("candidate_scope_violation" if not mixed or index == 1
+                     else "candidate_deterministic_check_failed"),
+            "platform_owned": False,
+            "retryable": True,
+            "evidence_ref": str(worktree),
+            "detail": (
+                "scope violations: changed lines %d exceed limit 320" % actual
+                if not mixed or index == 1 else "npm test failed"),
+        })
+    projstate.update_task(
+        agentic_dir, task["id"], status="blocked",
+        blocking_reason=reason, last_result="failure", attempts=1)
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason,
+        code=projstate.BLOCKER_CODE_PARALLEL_CANDIDATES_EXHAUSTED,
+        failure_class="model_output_invalid", platform_owned=False,
+        retryable=True, candidate_failures=failures)
+    return task, failures
+
+
+def test_recovery_promotes_medium_task_when_all_candidates_only_exceed_budget(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task, failures = _seed_line_budget_blocker(sandbox)
+    agentic_dir = str(sandbox["agentic"])
+    scheduler = _scheduler(sandbox)
+    scheduler.state["current_cycle"] = "run-budget"
+    scheduler.save()
+
+    from core import gitops
+    changed = ["index.html", "src/app.js", "src/styles.css",
+               "tests/interface.test.js"]
+    monkeypatch.setattr(gitops, "changed_files", lambda worktree: changed)
+    archived = []
+
+    def archive(root, runtime_dir, candidate_id, evidence_id):
+        archived.append((candidate_id, evidence_id))
+        return {"archived_branch":
+                "agentic/evidence/%s-%s" % (candidate_id, evidence_id)}
+
+    monkeypatch.setattr(
+        recovery.taskspace, "archive_and_reset_task_worktree", archive)
+
+    events = recovery.recover_underestimated_parallel_line_budget(
+        agentic_dir, str(sandbox["repo"]), scheduler)
+
+    assert [item[0] for item in archived] == [
+        task["id"], task["id"] + "--c2"]
+    assert all(item[1] == "run-budget" for item in archived)
+    assert events[0]["observed_changed_lines"] == [430, 489]
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["expected_size"] == "large"
+    assert restored[task["id"]]["status"] == "pending"
+    assert restored[task["id"]]["attempts"] == 0
+    assert projstate.open_blockers(agentic_dir) == []
+
+
+def test_line_budget_recovery_rejects_mixed_candidate_failures(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task, failures = _seed_line_budget_blocker(sandbox, mixed=True)
+    agentic_dir = str(sandbox["agentic"])
+    from core import gitops
+    monkeypatch.setattr(
+        gitops, "changed_files",
+        lambda worktree: ["index.html", "src/app.js"])
+
+    events = recovery.recover_underestimated_parallel_line_budget(
+        agentic_dir, str(sandbox["repo"]), _scheduler(sandbox))
+
+    assert events == []
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["expected_size"] == "medium"
+    assert restored[task["id"]]["status"] == "blocked"
+    assert len(projstate.open_blockers(agentic_dir)) == 1
