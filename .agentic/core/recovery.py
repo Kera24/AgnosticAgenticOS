@@ -753,6 +753,114 @@ def recover_whole_diff_secret_scan_blocker(agentic_dir):
 
 
 
+
+# -- underestimated parallel-candidate line budget ---------------------------
+
+_LINE_BUDGET_ONLY_RE = re.compile(
+    r"^scope violations: changed lines (?P<actual>\d+) exceed limit "
+    r"(?P<limit>\d+)$")
+
+
+def recover_underestimated_parallel_line_budget(
+        agentic_dir, root, scheduler):
+    """Retry a medium task when every candidate only exceeded its line budget.
+
+    Recovery is deliberately narrow: every structured candidate cause must be
+    a line-count-only scope violation, every preserved changed path must still
+    fit the backlog-authored expected paths, and the task may be promoted only
+    once (medium -> large). File scope, protected paths, and deterministic
+    checks are never widened.
+    """
+    from . import gitops
+
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or \
+                task.get("expected_size") != "medium":
+            continue
+        blocker = next((
+            item for item in blockers
+            if not item.get("resolved") and item.get("task") == task["id"] and
+            item.get("code") ==
+            projstate.BLOCKER_CODE_PARALLEL_CANDIDATES_EXHAUSTED
+        ), None)
+        failures_list = (blocker or {}).get("candidate_failures") or []
+        if not failures_list:
+            continue
+
+        parsed = []
+        compatible = True
+        allowed = [
+            bootstrap_gate.normalize_expected_entry(entry)["path"]
+            for entry in task.get("expected_paths") or []
+        ]
+        for candidate in failures_list:
+            match = _LINE_BUDGET_ONLY_RE.match(
+                str(candidate.get("detail") or "").strip())
+            if candidate.get("code") != "candidate_scope_violation" or \
+                    not match:
+                compatible = False
+                break
+            candidate_id = candidate.get("candidate_id")
+            worktree = candidate.get("evidence_ref") or \
+                taskspace.task_worktree_path(agentic_dir, candidate_id)
+            if not candidate_id or \
+                    not os.path.exists(os.path.join(worktree, ".git")):
+                compatible = False
+                break
+            changed = gitops.filter_tool_artifacts(
+                gitops.changed_files(worktree))
+            if not changed or gitops.check_paths(
+                    changed, allowed, [], [], authorised_exceptions=[]):
+                compatible = False
+                break
+            parsed.append({
+                "candidate_id": candidate_id,
+                "actual": int(match.group("actual")),
+                "limit": int(match.group("limit")),
+                "changed_files": changed,
+            })
+        if not compatible or len(parsed) != len(failures_list):
+            continue
+
+        evidence_id = scheduler.state.get("current_cycle") or "recovery"
+        archived = []
+        for candidate in parsed:
+            result = taskspace.archive_and_reset_task_worktree(
+                root, agentic_dir, candidate["candidate_id"], evidence_id)
+            archived.append(result.get("archived_branch"))
+
+        blocker.update({
+            "resolved": True,
+            "resolved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "failure_class": "task_budget_underestimated",
+            "platform_owned": True,
+            "retryable": True,
+            "evidence_ref": ", ".join(filter(None, archived)) or None,
+        })
+        projstate.update_task(
+            agentic_dir, task["id"], expected_size="large", status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "promote_task_size_and_retry",
+            "from_expected_size": "medium",
+            "to_expected_size": "large",
+            "resolved_blockers": 1,
+            "run_id": evidence_id,
+            "observed_changed_lines": [item["actual"] for item in parsed],
+            "preserved_allowed_paths": sorted(set(
+                path for item in parsed for path in item["changed_files"])),
+            "archived_branches": archived,
+            "evidence_ref": ", ".join(filter(None, archived)) or None,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
 # -- stale task-branch integration conflict ----------------------------------
 
 def recover_stale_task_integration_blocker(agentic_dir, root, scheduler):
@@ -1025,6 +1133,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
     integration_events = recover_stale_task_integration_blocker(
         agentic_dir, root, scheduler)
+    line_budget_events = recover_underestimated_parallel_line_budget(
+        agentic_dir, root, scheduler)
     migrated = list(bootstrap_gate.recover_bootstrap_deadlock(agentic_dir))
     migrated += list(bootstrap_gate.recover_expected_paths_contract_bug(
         agentic_dir))
@@ -1038,7 +1148,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         agentic_dir)
     for event in (windows_command_events + task_gate_events +
                   qa_evidence_events + stale_source_events +
-                  foreign_pytest_events + read_check_events):
+                  foreign_pytest_events + read_check_events +
+                  line_budget_events):
         action = event.get("action")
         if action == "reset_windows_command_resolution_blocker":
             failure_class = "platform_capability_missing"
@@ -1050,6 +1161,8 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
             failure_class = "legacy_unix_only_read_check"
         elif action == "reset_foreign_pytest_autodetection_blocker":
             failure_class = "foreign_test_framework_autodetected"
+        elif action == "promote_task_size_and_retry":
+            failure_class = "task_budget_underestimated"
         else:
             failure_class = "task_contract_invalid"
         logs.decision(memory_dir, {
@@ -1079,7 +1192,7 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
         contract_events + windows_codex_events + windows_command_events +
         task_gate_events + qa_evidence_events + stale_source_events +
         foreign_pytest_events + read_check_events + secret_scan_events +
-        integration_events +
+        integration_events + line_budget_events +
         plan_fidelity_events)
 
     stages["task_state_reconciliation"] = _stage(
