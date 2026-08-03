@@ -117,6 +117,9 @@ Advanced feature promotion gates:
   python .agentic/run features status <project-id> [feature]
   python .agentic/run features promote <project-id> <feature> <state>
                                         state: disabled|shadow|canary|stable
+  python .agentic/run features probe <project-id> contract_amendments
+                                        replay real shadow evidence through
+                                        active policy without changing project
 
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
@@ -1403,7 +1406,8 @@ def cmd_features(cfg, args):
     extra = list(args.extra or [])
     if not extra:
         print("usage: features status <project-id> [feature] | "
-              "features promote <project-id> <feature> <state>",
+              "features promote <project-id> <feature> <state> | "
+              "features probe <project-id> contract_amendments",
               file=sys.stderr)
         return 2
     project_id = extra[0]
@@ -1453,6 +1457,21 @@ def cmd_features(cfg, args):
                 feature, project_id=project_id),
         })
         return 0
+    if action == "probe":
+        feature = extra[1] if len(extra) > 1 else "contract_amendments"
+        if feature != "contract_amendments":
+            print("unsupported feature probe: %s" % feature,
+                  file=sys.stderr)
+            return 2
+        from core.featureprobe import run_contract_amendment_probe
+        try:
+            result = run_contract_amendment_probe(
+                project_cfg, project_id)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        _print(result)
+        return 0 if result.get("passed") else 1
     print("unknown features action %r" % action, file=sys.stderr)
     return 2
 
