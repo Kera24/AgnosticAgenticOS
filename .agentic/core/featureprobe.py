@@ -1,7 +1,8 @@
 """Safe, deterministic probes for promotion-gated features.
 
 Probes replay real persisted project evidence through production policy code.
-They never edit project state, run a model, or count as build successes.
+They never edit project state, run a model, or count as build successes;
+distinct passing probes are tracked separately as stable-promotion evidence.
 """
 import copy
 import datetime as _dt
@@ -152,4 +153,12 @@ def run_contract_amendment_probe(project_cfg, project_id):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
     report["report_path"] = path
+    report["evidence_recorded"] = registry.record_probe(
+        "contract_amendments", project_id, source_run, report["passed"],
+        report_path=path,
+        detail="active contract-amendment replay and rollback guard")
+    report["feature_status"] = registry.status(
+        "contract_amendments", project_id=project_id)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
     return report

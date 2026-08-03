@@ -57,11 +57,19 @@ def test_probe_replays_real_proposal_and_preserves_live_canary(tmp_path):
     assert result["rollback_guard"]["passed"] is True
     assert result["rollback_guard"]["resulting_state"] == "shadow"
     assert result["mutated_project_state"] is False
+    assert result["evidence_recorded"] is True
+    assert result["feature_status"]["canary_probe_successes"] == 1
+    assert result["feature_status"]["stable_promotion"]["eligible"] is True
     live = FeatureGateRegistry(memory, cfg).decision(
         "contract_amendments", "probe-project")
     assert live["effective_state"] == "canary"
     assert live["active"] is True
     assert os.path.exists(result["report_path"])
+
+    repeated = run_contract_amendment_probe(cfg, "probe-project")
+    assert repeated["passed"] is True
+    assert repeated["evidence_recorded"] is False
+    assert repeated["feature_status"]["canary_probe_successes"] == 1
 
 
 def test_probe_refuses_inactive_feature(tmp_path):

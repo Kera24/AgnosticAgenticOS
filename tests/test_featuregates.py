@@ -132,10 +132,52 @@ def test_promotion_requires_successful_evidence(tmp_path):
     registry.begin_run("run-1", {"contract_amendments": gate})
     registry.record_outcome("run-1", "success")
     promoted = registry.promote(
-        "contract_amendments", "stable", minimum_successes=1)
+        "contract_amendments", "canary", minimum_successes=1,
+        project_id="project-a")
+    registry.record_probe(
+        "contract_amendments", "project-a", "probe-1", True)
+    promoted = registry.promote(
+        "contract_amendments", "stable", minimum_successes=1,
+        project_id="project-a")
 
     assert promoted["effective_state"] == "stable"
     assert promoted["active"] is True
+
+
+def test_stable_promotion_rejects_shadow_evidence_without_canary_probe(
+        tmp_path):
+    registry = FeatureGateRegistry(tmp_path, _cfg("shadow"))
+    gate = registry.decision("contract_amendments", "project-a")
+    registry.begin_run("shadow-1", {"contract_amendments": gate})
+    registry.record_outcome("shadow-1", "success")
+    registry.promote(
+        "contract_amendments", "canary", minimum_successes=1,
+        project_id="project-a")
+
+    with pytest.raises(ValueError, match="canary probe evidence"):
+        registry.promote(
+            "contract_amendments", "stable", minimum_successes=1,
+            project_id="project-a")
+
+
+def test_probe_evidence_is_state_specific_and_idempotent(tmp_path):
+    registry = FeatureGateRegistry(tmp_path, _cfg("shadow"))
+    shadow = registry.decision("contract_amendments", "project-a")
+    registry.begin_run("shadow-1", {"contract_amendments": shadow})
+    registry.record_outcome("shadow-1", "success")
+    registry.promote(
+        "contract_amendments", "canary", minimum_successes=1,
+        project_id="project-a")
+
+    assert registry.record_probe(
+        "contract_amendments", "project-a", "source-run", True) is True
+    assert registry.record_probe(
+        "contract_amendments", "project-a", "source-run", True) is False
+
+    status = registry.status("contract_amendments", "project-a")
+    assert status["successes_by_state"] == {"shadow": 1}
+    assert status["canary_probe_successes"] == 1
+    assert status["stable_promotion"]["eligible"] is True
 
 
 def test_registry_evidence_persists_across_instances(tmp_path):
@@ -150,6 +192,29 @@ def test_registry_evidence_persists_across_instances(tmp_path):
     with open(second.path, encoding="utf-8") as handle:
         persisted = json.load(handle)
     assert persisted["runs"]["run-1"]["outcome_recorded"] is True
+
+
+def test_legacy_success_totals_migrate_conservatively_to_shadow(tmp_path):
+    path = tmp_path / "feature-gates.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "features": {"contract_amendments": {
+            "successes": 4, "failures": 0,
+            "platform_failures": 0, "rollback_count": 0,
+            "override_state": "canary", "override_source": "promotion",
+            "runtime_canary_projects": ["project-a"],
+            "last_rollback_reason": None,
+        }},
+        "runs": {},
+    }), encoding="utf-8")
+
+    status = FeatureGateRegistry(
+        tmp_path, _cfg("shadow")).status(
+            "contract_amendments", "project-a")
+
+    assert status["successes_by_state"] == {"shadow": 4}
+    assert status["canary_probe_successes"] == 0
+    assert status["stable_promotion"]["eligible"] is False
 
 
 

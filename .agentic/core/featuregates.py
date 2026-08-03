@@ -48,6 +48,11 @@ class FeatureGateRegistry:
         record = self.data["features"].setdefault(name, {
             "successes": 0,
             "failures": 0,
+            "successes_by_state": {},
+            "failures_by_state": {},
+            "canary_probe_successes": 0,
+            "canary_probe_failures": 0,
+            "probes": {},
             "platform_failures": 0,
             "rollback_count": 0,
             "override_state": None,
@@ -57,6 +62,16 @@ class FeatureGateRegistry:
         })
         record.setdefault("runtime_canary_projects", [])
         record.setdefault("override_source", None)
+        # Version-1 evidence did not identify the gate state. Treat it as
+        # shadow evidence: conservative migration means old totals can unlock
+        # canary, but never stable.
+        if "successes_by_state" not in record:
+            record["successes_by_state"] = {
+                "shadow": int(record.get("successes", 0))}
+        record.setdefault("failures_by_state", {})
+        record.setdefault("canary_probe_successes", 0)
+        record.setdefault("canary_probe_failures", 0)
+        record.setdefault("probes", {})
         return record
 
     def decision(self, name, project_id=None):
@@ -107,10 +122,15 @@ class FeatureGateRegistry:
             if not decision.get("active") and not decision.get("observe_only"):
                 continue
             record = self._record(name)
+            state = str(decision.get("effective_state") or "disabled")
             if outcome == "success":
                 record["successes"] += 1
+                bucket = record["successes_by_state"]
+                bucket[state] = int(bucket.get(state, 0)) + 1
             else:
                 record["failures"] += 1
+                bucket = record["failures_by_state"]
+                bucket[state] = int(bucket.get(state, 0)) + 1
             if platform_failure:
                 record["platform_failures"] += 1
                 if decision.get("effective_state") == "canary":
@@ -131,8 +151,36 @@ class FeatureGateRegistry:
         self._save()
         return events
 
+    def record_probe(self, name, project_id, probe_id, passed,
+                     report_path=None, detail=None):
+        """Persist distinct canary-probe evidence without counting a build.
+
+        Replaying one source run repeatedly is idempotent and cannot inflate
+        promotion evidence.
+        """
+        decision = self.decision(name, project_id)
+        if decision.get("effective_state") != "canary" or \
+                not decision.get("active"):
+            raise ValueError("canary probe requires an active canary")
+        record = self._record(name)
+        key = "%s:%s" % (project_id, probe_id)
+        if key in record["probes"]:
+            return False
+        record["probes"][key] = {
+            "project_id": project_id,
+            "probe_id": str(probe_id),
+            "passed": bool(passed),
+            "report_path": str(report_path) if report_path else None,
+            "detail": str(detail or "")[:300],
+        }
+        counter = ("canary_probe_successes" if passed
+                   else "canary_probe_failures")
+        record[counter] = int(record.get(counter, 0)) + 1
+        self._save()
+        return True
+
     def promote(self, name, target_state, minimum_successes=1,
-                project_id=None):
+                project_id=None, minimum_canary_probes=1):
         if target_state not in STATES:
             raise ValueError("unsupported feature state: %s" % target_state)
         record = self._record(name)
@@ -143,6 +191,18 @@ class FeatureGateRegistry:
             raise ValueError(
                 "insufficient successful evidence for %s: %s < %s"
                 % (name, record.get("successes", 0), minimum_successes))
+        if target_state == "stable":
+            current = self.decision(name, project_id)
+            if current.get("effective_state") != "canary" or \
+                    not current.get("active"):
+                raise ValueError(
+                    "stable promotion requires an active canary")
+            observed = int(record.get("canary_probe_successes", 0))
+            required = int(minimum_canary_probes)
+            if observed < required:
+                raise ValueError(
+                    "insufficient canary probe evidence for %s: %s < %s"
+                    % (name, observed, required))
         record["override_state"] = target_state
         record["override_source"] = "promotion"
         if target_state == "canary" and project_id not in \
@@ -153,6 +213,17 @@ class FeatureGateRegistry:
         return self.decision(name, project_id=project_id)
 
     def status(self, name, project_id=None):
-        return dict(
-            self._record(name),
-            **self.decision(name, project_id=project_id))
+        record = self._record(name)
+        decision = self.decision(name, project_id=project_id)
+        required = int(self._config(name).get(
+            "promotion_min_canary_probes", 1))
+        return dict(record, **decision, stable_promotion={
+            "eligible": bool(
+                decision.get("effective_state") == "stable" or
+                (decision.get("effective_state") == "canary" and
+                 decision.get("active") and
+                 int(record.get("canary_probe_successes", 0)) >= required)),
+            "required_canary_probes": required,
+            "observed_canary_probes": int(
+                record.get("canary_probe_successes", 0)),
+        })
