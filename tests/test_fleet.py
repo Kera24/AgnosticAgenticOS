@@ -137,6 +137,27 @@ def test_global_pause_blocks_everything(world):
     assert decisions2["start"]
 
 
+def test_no_eligible_task_is_not_repeatedly_dispatched(world):
+    project_id = world["ids"][0]
+    routed(world, {project_id: "claude"})
+    state_dir = world["registry"].project_runtime_dir(project_id)
+    task_id = projstate.load_backlog(state_dir)[0]["id"]
+    reason = "dependency chain blocked"
+    projstate.update_task(state_dir, task_id, status="blocked",
+                          blocking_reason=reason)
+    projstate.add_blocker(state_dir, task_id, reason,
+                          human_only=False, code=None)
+
+    decisions = plan(world["cfg"], world["registry"],
+                     clock=world["clock"], home=world["home"])
+
+    assert decisions["states"][project_id] == "blocked"
+    assert project_id not in [s["project"] for s in decisions["start"]]
+    waiting = [w for w in decisions["waiting"]
+               if w["project"] == project_id]
+    assert waiting and "no eligible task" in waiting[0]["reason"]
+
+
 def test_per_project_pause(world):
     routed(world, {world["ids"][0]: "claude", world["ids"][1]: "codex"})
     from core.scheduler import Scheduler

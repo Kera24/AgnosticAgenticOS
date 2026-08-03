@@ -7,6 +7,13 @@ import datetime as _dt
 import json
 import os
 import shlex
+import functools
+import http.server
+import posixpath
+import re
+import threading
+import urllib.parse
+import urllib.request
 
 from . import execpolicy
 
@@ -50,6 +57,153 @@ def _platform_neutral_existence_check(command, repo_root):
     return exists, "%s %r %s" % (kind, path,
                                 "exists" if exists else "does not exist")
 
+
+def _platform_neutral_read_check(command, repo_root):
+    """Translate exactly `cat RELATIVE_FILE` into a bounded internal read.
+
+    This preserves the read-only intent of a common documentation check on
+    every OS without invoking a shell. Options, absolute paths, traversal,
+    multiple operands, directories, and unreadable files are rejected.
+    """
+    try:
+        tokens = shlex.split(str(command), posix=True)
+    except ValueError:
+        return None
+    if len(tokens) != 2 or tokens[0] != "cat":
+        return None
+    path = tokens[1]
+    if not path or path.startswith("-") or os.path.isabs(path):
+        return None
+    root = os.path.realpath(repo_root)
+    full = os.path.realpath(os.path.join(root, path))
+    try:
+        if os.path.commonpath([root, full]) != root:
+            return None
+    except ValueError:
+        return None
+    if not os.path.isfile(full):
+        return False, "file %r does not exist" % path
+    try:
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError as exc:
+        return False, "file %r is not readable: %s" % (path, exc)
+    return True, content[-1200:]
+
+
+_LOCAL_ASSET_RE = re.compile(
+    r'''(?i)(?:src|href)\s*=\s*["']([^"'#?]+)["']|'''
+    r'''["']([^"']+\.(?:html|css|js|mjs))["']''')
+
+
+
+def _safe_local_asset(base_path, reference):
+    """Resolve a browser asset reference without permitting external access
+    or traversal outside the project root."""
+    parsed = urllib.parse.urlsplit(str(reference))
+    if parsed.scheme or parsed.netloc or str(reference).startswith("//"):
+        return None
+    raw_path = urllib.parse.unquote(parsed.path).replace("\\", "/")
+    if raw_path.startswith("/"):
+        candidate = posixpath.normpath(raw_path.lstrip("/"))
+    else:
+        candidate = posixpath.normpath(posixpath.join(
+            posixpath.dirname(base_path), raw_path))
+    if candidate in ("", ".") or candidate == ".." or candidate.startswith("../"):
+        return None
+    return candidate
+
+
+def _has_static_app_root(body):
+    """Return whether index HTML contains a meaningful application root.
+
+    Framework-style static apps commonly use an element with id="app", while
+    plain semantic applications often render directly inside <main>. Accept
+    either form, but do not let an empty <main> make a blank page pass.
+    """
+    if re.search(rb'id\s*=\s*["\x27]app["\x27]', body, re.I):
+        return True
+    main = re.search(rb'<main\b[^>]*>(.*?)</main\s*>', body, re.I | re.S)
+    if not main:
+        return False
+    meaningful = re.sub(rb'<!--.*?-->', b'', main.group(1), flags=re.S)
+    return bool(meaningful.strip())
+
+
+def run_local_static_app_smoke(repo_root):
+    """Serve a static application on loopback and verify its load graph.
+
+    This is deterministic evidence for source-plan criteria such as
+    "the application opens locally in a browser". It deliberately does not
+    contact an external network or invoke a shell. The check loads index.html,
+    verifies the application mount, follows local HTML script/style references
+    and local HTML/CSS/JS references found in those assets, and requires every
+    discovered resource to return HTTP 200.
+    """
+    index_path = os.path.join(repo_root, "index.html")
+    record = {
+        "name": "local-static-app-smoke",
+        "command": "internal: serve and load static app on loopback",
+        "mandatory": True,
+        "passed": False,
+        "exit_code": 1,
+        "detail": "",
+        "kind": "structural",
+        "platform_neutral": True,
+    }
+    if not os.path.isfile(index_path):
+        record["detail"] = "index.html does not exist"
+        return record
+
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, format, *args):  # noqa: A002
+            pass
+
+    handler = functools.partial(QuietHandler, directory=repo_root)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    loaded = []
+    try:
+        thread.start()
+        origin = "http://127.0.0.1:%d/" % server.server_address[1]
+        pending = ["index.html"]
+        seen = set()
+        while pending:
+            asset = pending.pop(0)
+            if asset in seen:
+                continue
+            seen.add(asset)
+            with urllib.request.urlopen(
+                    urllib.parse.urljoin(origin, asset), timeout=5) as response:
+                if response.status != 200:
+                    raise OSError("%s returned HTTP %s" %
+                                  (asset, response.status))
+                body = response.read(1024 * 1024)
+            loaded.append(asset)
+            if asset == "index.html" and not _has_static_app_root(body):
+                raise ValueError(
+                    "index.html has neither #app mount nor non-empty <main> root")
+            if asset.endswith((".html", ".js", ".mjs", ".css")):
+                text_body = body.decode("utf-8", errors="replace")
+                for match in _LOCAL_ASSET_RE.finditer(text_body):
+                    reference = match.group(1) or match.group(2)
+                    resolved = _safe_local_asset(asset, reference)
+                    if resolved and resolved not in seen:
+                        pending.append(resolved)
+        record["passed"] = True
+        record["exit_code"] = 0
+        record["detail"] = (
+            "served and loaded static app over loopback HTTP; application "
+            "root present; loaded local assets: %s" % ", ".join(loaded))
+    except Exception as exc:  # noqa: BLE001
+        record["detail"] = "local static app load failed: %s" % exc
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    return record
+
+
 # Deterministic-check classification (bootstrap fix): every check result is
 # tagged with exactly one of these kinds so callers can tell "a real test
 # suite ran and passed" apart from every other flavour of deterministic
@@ -74,12 +228,31 @@ def classify_check_kind(name, command):
                           # has always meant "the test suite" unless labeled
 
 
+def _contains_python_tests(repo_root):
+    """Return true only when tests/ contains Python test source.
+
+    A directory named tests is language-neutral: Node, Go, Rust, and browser
+    projects commonly use it. Treating the directory alone as pytest evidence
+    injects a foreign mandatory check into otherwise valid projects.
+    """
+    tests_root = os.path.join(repo_root, "tests")
+    if not os.path.isdir(tests_root):
+        return False
+    for current, dirs, files in os.walk(tests_root):
+        dirs[:] = [d for d in dirs if d not in {
+            "__pycache__", "node_modules", ".git",
+        }]
+        if any(name.endswith(".py") for name in files):
+            return True
+    return False
+
+
 def detect_commands(repo_root):
     """Best-effort autodetection of repository checks."""
     commands = []
     exists = lambda *p: os.path.exists(os.path.join(repo_root, *p))
     if (exists("pyproject.toml") or exists("pytest.ini") or exists("setup.cfg")
-            or exists("tests")):
+            or _contains_python_tests(repo_root)):
         commands.append({"name": "pytest", "command": "python -m pytest -q",
                          "mandatory": True, "kind": "test_suite"})
     if exists("package.json"):
@@ -131,7 +304,8 @@ def save_baseline(agentic_dir, results):
     return data
 
 
-def run_checks(cfg, workdir, log_dir=None, timeout=None):
+def run_checks(cfg, workdir, log_dir=None, timeout=None,
+               required_commands=None):
     """Run every configured check in workdir. Mandatory checks are never
     skipped; a missing log_dir only skips log persistence, not checks.
 
@@ -139,6 +313,35 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
     `no_checks: true`): a repository without deterministic verification can
     never pass the gate, and no AI verdict may convert that into success."""
     commands, auto = resolve_commands(cfg, workdir)
+    commands = list(commands)
+    existing = {str(c.get("command")) for c in commands}
+    # Explicit administrator verification commands are authoritative (and
+    # are used by network-free acceptance fixtures as safe substitutes).
+    # Canonical task checks augment auto-detection, or can be opted into
+    # alongside explicit checks with include_task_checks: true.
+    include_task_checks = auto or bool(
+        (cfg.get("verification") or {}).get("include_task_checks", False))
+    for index, raw in enumerate(
+            (required_commands or []) if include_task_checks else [], 1):
+        check = dict(raw) if isinstance(raw, dict) else {
+            "name": "task-deterministic-%d" % index,
+            "command": str(raw),
+            "mandatory": True,
+            "kind": "test_suite",
+        }
+        command = str(check.get("command") or "")
+        if not command or command in existing:
+            continue
+        # A task contract may express portable fallback semantics as
+        # "first || second". Preserve that meaning without ever enabling a
+        # shell: each alternative is independently parsed and executed by
+        # execpolicy with shell=False.
+        alternatives = [part.strip() for part in command.split(" || ")
+                        if part.strip()]
+        if len(alternatives) > 1:
+            check["alternatives"] = alternatives
+        commands.append(check)
+        existing.add(command)
     if not commands:
         return {"ok": False, "auto_detected": auto, "results": [],
                 "no_checks": True, "tests": "not_configured_yet",
@@ -159,6 +362,8 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
         # the safe capability layer's own primitive (a plain os.path
         # check) is both correct and platform-neutral, on every OS.
         neutral = _platform_neutral_existence_check(check["command"], workdir)
+        if neutral is None:
+            neutral = _platform_neutral_read_check(check["command"], workdir)
         if neutral is not None:
             record["passed"], record["detail"] = neutral
             record["exit_code"] = 0 if record["passed"] else 1
@@ -178,22 +383,37 @@ def run_checks(cfg, workdir, log_dir=None, timeout=None):
             record["platform_neutral"] = False
             record["skipped_unix_only"] = True
         else:
-            run = execpolicy.run_command(
-                check["command"], cwd=workdir, timeout=timeout,
-                shell_required=bool(check.get("shell_required", False)),
-                source="config")
+            alternatives = check.get("alternatives") or [check["command"]]
+            attempts = []
+            run = None
+            for alternative in alternatives:
+                run = execpolicy.run_command(
+                    alternative, cwd=workdir, timeout=timeout,
+                    shell_required=bool(check.get("shell_required", False)),
+                    source="config")
+                attempts.append(run)
+                if run["exit_code"] == 0 and not run["timed_out"]:
+                    break
             record["exit_code"] = run["exit_code"]
             record["passed"] = run["exit_code"] == 0 and not run["timed_out"]
-            output = run["stdout"] + run["stderr"]
+            output = "\n".join(
+                (attempt["stdout"] + attempt["stderr"]).strip()
+                for attempt in attempts)
             record["detail"] = ("timed out after %ss" % timeout
                                 if run["timed_out"]
                                 else output[-400:].strip())
+            if len(attempts) > 1:
+                record["attempted_alternatives"] = [
+                    attempt["argv"] for attempt in attempts]
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
                 with open(os.path.join(log_dir, name + ".log"), "w",
                           encoding="utf-8", errors="replace") as fh:
-                    fh.write("$ %s\nexit: %s\n\n%s"
-                            % (run["argv"], record["exit_code"], output))
+                    for attempt in attempts:
+                        attempt_output = attempt["stdout"] + attempt["stderr"]
+                        fh.write("$ %s\nexit: %s\n\n%s\n"
+                                 % (attempt["argv"], attempt["exit_code"],
+                                    attempt_output))
         results.append(record)
         if mandatory and not record["passed"]:
             ok = False

@@ -8,11 +8,15 @@ blocker had no path back to health short of hand-editing state files.
 now runs; every stage returns a structured result, even when it finds
 nothing to do, so a caller can always see exactly what was (or wasn't)
 recovered."""
+import datetime as _dt
+import glob
 import json
 import os
+import re
+import shutil
 
 from . import bootstrap_gate, contract_recovery, parallel_recovery
-from . import projstate, taskspace
+from . import logs, projstate, taskspace
 
 
 def _stage(name, events, extra=None):
@@ -45,21 +49,925 @@ def _stale_lease_recovery(agentic_dir, cfg, clock):
                   [{"action": "released_expired_lease"}])
 
 
+# -- fixed native-Windows Codex sandbox blocker -------------------------------
+
+_WINDOWS_CODEX_READ_ONLY_RE = re.compile(
+    r"^(?:Workspace is read-only, so the required scaffold files and "
+    r"directories cannot be created|Workspace filesystem is read-only, "
+    r"so required edits(?:\s+.*?)?\s+cannot be made)\.?$", re.I)
+
+
+def _is_native_windows():
+    return os.name == "nt"
+
+
+def _is_windows_codex_readonly_detail(detail):
+    """Match only the exact persisted live failure produced by the broken
+    native-Windows Codex sandbox. This is deliberately narrower than a bare
+    read-only substring so a genuine repository policy denial is never
+    silently cleared."""
+    return bool(_WINDOWS_CODEX_READ_ONLY_RE.match((detail or "").strip()))
+
+
+def recover_windows_codex_readonly_blocker(agentic_dir, cfg):
+    """Clear the stale blocker once the Windows Codex sandbox fix is active.
+
+    Recovery is permitted only on native Windows and only when the machine
+    explicitly loads Codex user config (ignore_user_config: false), which is
+    where the elevated Windows sandbox selection lives. It never marks work
+    done; it resets the affected task to pending and records the old blocker
+    as a resolved platform-owned workspace-policy failure.
+    """
+    codex = ((cfg or {}).get("backends") or {}).get("codex") or {}
+    if not _is_native_windows() or \
+            codex.get("ignore_user_config") is not False:
+        return []
+    if not projstate.exists(agentic_dir):
+        return []
+
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []})
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or not \
+                _is_windows_codex_readonly_detail(
+                    task.get("blocking_reason")):
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not _is_windows_codex_readonly_detail(blocker.get("reason")):
+                continue
+            blocker.update({
+                "resolved": True,
+                "code": projstate.BLOCKER_CODE_POLICY_DENIED,
+                "failure_class": "workspace_policy_denied",
+                "platform_owned": True,
+                "retryable": True,
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_windows_codex_readonly_blocker",
+            "resolved_blockers": resolved,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+# -- fixed Windows command-shim resolution blocker ---------------------------
+
+_DETERMINISTIC_REPAIR_EXHAUSTED_REASONS = {
+    "deterministic checks failing after 3 attempts",
+    "repair attempts exhausted",
+}
+
+
+def _windows_command_available(command):
+    return bool(shutil.which(command))
+
+
+def _command_resolution_evidence(agentic_dir, task_id):
+    """Find the newest persisted gate result proving a bare npm lookup failed.
+
+    The generic task blocker does not retain individual gate details, so
+    recovery consults immutable cycle artifacts. It never relies on model
+    prose and never clears a normal failing-test result.
+    """
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        order_path = os.path.join(cycle_dir, "work-order.json")
+        try:
+            with open(order_path, encoding="utf-8") as fh:
+                order = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if order.get("item") != task_id:
+            continue
+        for path in sorted(glob.glob(
+                os.path.join(cycle_dir, "validation-result-*.json")),
+                reverse=True):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    result = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            for check in result.get("results") or []:
+                command = str(check.get("command") or "")
+                detail = str(check.get("detail") or "")
+                if check.get("exit_code") == 127 and \
+                        command.lower().startswith("npm ") and \
+                        "command not found: npm" in detail.lower():
+                    return {
+                        "run_id": os.path.basename(cycle_dir).replace(
+                            "cycle-", "", 1),
+                        "evidence_ref": path,
+                        "command": command,
+                    }
+        return None
+    return None
+
+
+def recover_windows_command_resolution_blocker(agentic_dir, cfg):
+    """Retry a generic gate-exhaustion blocker only when persisted evidence
+    proves the now-fixed Windows npm/PATHEXT resolution defect."""
+    if not _is_native_windows() or not _windows_command_available("npm"):
+        return []
+    if not projstate.exists(agentic_dir):
+        return []
+
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []})
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or \
+                task.get("blocking_reason") not in _DETERMINISTIC_REPAIR_EXHAUSTED_REASONS:
+            continue
+        evidence = _command_resolution_evidence(agentic_dir, task["id"])
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if blocker.get("reason") not in _DETERMINISTIC_REPAIR_EXHAUSTED_REASONS:
+                continue
+            blocker.update({
+                "resolved": True,
+                "code": projstate.BLOCKER_CODE_POLICY_DENIED,
+                "failure_class": "platform_capability_missing",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_windows_command_resolution_blocker",
+            "resolved_blockers": resolved,
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+
+# -- fixed language-neutral tests-directory autodetection blocker -------------
+
+def _foreign_pytest_autodetection_evidence(agentic_dir, task_id):
+    """Find a cycle where pytest was inferred solely for a non-Python task."""
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                task_contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if task_contract.get("task_id") != task_id:
+            continue
+        required = " ".join(str(c) for c in
+                            task_contract.get("deterministic_checks") or [])
+        if "pytest" in required.lower():
+            return None
+        for path in sorted(glob.glob(
+                os.path.join(cycle_dir, "validation-result-*.json"))):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if not validation.get("auto_detected"):
+                continue
+            for result in validation.get("results") or []:
+                if str(result.get("name") or "").lower() != "pytest":
+                    continue
+                detail = str(result.get("detail") or "").lower()
+                if result.get("exit_code") == 5 and "no tests ran" in detail:
+                    return {
+                        "run_id": task_contract.get("run_id") or
+                                  os.path.basename(cycle_dir).replace(
+                                      "cycle-", "", 1),
+                        "evidence_ref": path,
+                    }
+        return None
+    return None
+
+
+def recover_foreign_pytest_autodetection_blocker(
+        agentic_dir, root=None, evidence_id="recovery"):
+    """Reset a task blocked by the fixed tests/-means-pytest detection bug."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked":
+            continue
+        evidence = _foreign_pytest_autodetection_evidence(
+            agentic_dir, task["id"])
+        if not evidence:
+            continue
+        archived = None
+        task_git = os.path.join(
+            str(agentic_dir), "worktrees", "tasks", task["id"], ".git")
+        if root and os.path.exists(task_git):
+            archived = taskspace.archive_and_reset_task_worktree(
+                root, agentic_dir, task["id"],
+                evidence_id or evidence["run_id"])
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "foreign_test_framework_autodetected",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_foreign_pytest_autodetection_blocker",
+            "resolved_blockers": resolved,
+            "archived_branch": archived and archived.get("archived_branch"),
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+# -- fixed omission of canonical task-specific deterministic checks ------------
+
+_QA_MISSING_TASK_GATE_RE = re.compile(
+    r"^QA: .*required deterministic .*gate is not evidenced", re.I)
+
+
+def _missing_task_gate_evidence(agentic_dir, task_id):
+    runs_root = os.path.join(str(agentic_dir), "runs")
+    cycle_dirs = sorted(
+        glob.glob(os.path.join(runs_root, "cycle-*")),
+        key=lambda p: os.path.getmtime(p), reverse=True)
+    for cycle_dir in cycle_dirs:
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if contract.get("task_id") != task_id:
+            continue
+        required = [str(command) for command in
+                    contract.get("deterministic_checks") or []]
+        observed = set()
+        validation_paths = sorted(glob.glob(
+            os.path.join(cycle_dir, "validation-result-*.json")))
+        for validation_path in validation_paths:
+            try:
+                with open(validation_path, encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            observed.update(str(result.get("command") or "")
+                            for result in validation.get("results") or [])
+        missing = [command for command in required if command not in observed]
+        if missing:
+            return {
+                "run_id": contract.get("run_id") or
+                          os.path.basename(cycle_dir).replace("cycle-", "", 1),
+                "evidence_ref": contract_path,
+                "missing_commands": missing,
+                "observed_commands": sorted(observed),
+            }
+        return None
+    return None
+
+
+def recover_missing_task_gate_blocker(agentic_dir, cfg, memory_dir):
+    """Retry only when artifacts prove the canonical task check was omitted."""
+    if not projstate.exists(agentic_dir):
+        return []
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []})
+    blockers = blockers_doc.get("blockers", [])
+    backlog = {task["id"]: task for task in projstate.load_backlog(agentic_dir)}
+    events = []
+    for task_id, task in backlog.items():
+        reason = task.get("blocking_reason") or ""
+        if task.get("status") != "blocked" or not \
+                _QA_MISSING_TASK_GATE_RE.search(reason):
+            continue
+        evidence = _missing_task_gate_evidence(agentic_dir, task_id)
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task_id:
+                continue
+            if not _QA_MISSING_TASK_GATE_RE.search(
+                    blocker.get("reason") or ""):
+                continue
+            blocker.update({
+                "resolved": True,
+                "code": projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+                "failure_class": "task_contract_invalid",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(agentic_dir, task_id, status="pending",
+                              blocking_reason=None, last_result=None,
+                              attempts=0)
+        events.append({
+            "task_id": task_id,
+            "action": "reset_missing_task_deterministic_gate",
+            "resolved_blockers": resolved,
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+
+# -- legacy QA semantic-evidence omission ------------------------------------
+
+_QA_FILTER_EVIDENCE_RE = re.compile(
+    r"^QA: .*required filter coverage is not satisfied", re.I | re.S)
+
+
+def _passing_filter_coverage_evidence(agentic_dir, task_id):
+    """Return archived evidence only when every mandatory check passed and
+    its bounded output names the filter behaviours QA could not previously
+    see because _review_input discarded command details."""
+    pattern = os.path.join(str(agentic_dir), "runs", "cycle-*")
+    for cycle_dir in sorted(glob.glob(pattern), reverse=True):
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if contract.get("task_id") != task_id:
+            continue
+        validations = []
+        for path in sorted(glob.glob(os.path.join(
+                cycle_dir, "validation-result-*.json"))):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    validations.append(json.load(fh))
+            except (OSError, ValueError):
+                continue
+        if not validations:
+            return None
+        results = [result for validation in validations
+                   for result in validation.get("results") or []
+                   if result.get("mandatory")]
+        if not results or not all(result.get("passed") for result in results):
+            return None
+        details = "\n".join(str(result.get("detail") or "")
+                            for result in results).lower()
+        if "active" not in details or "completed" not in details or \
+                ("filter" not in details and "all" not in details):
+            return None
+        return {
+            "run_id": contract.get("run_id") or
+                      os.path.basename(cycle_dir).replace("cycle-", "", 1),
+            "evidence_ref": contract_path,
+        }
+    return None
+
+
+def recover_qa_semantic_evidence_blocker(agentic_dir, root=None,
+                                         evidence_id="recovery"):
+    """Reset only the historical filter-coverage rejection caused by QA
+    receiving booleans without the already-passing named subtest output."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        reason = task.get("blocking_reason") or ""
+        if task.get("status") != "blocked" or not \
+                _QA_FILTER_EVIDENCE_RE.search(reason):
+            continue
+        evidence = _passing_filter_coverage_evidence(
+            agentic_dir, task["id"])
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not _QA_FILTER_EVIDENCE_RE.search(blocker.get("reason") or ""):
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "legacy_qa_evidence_omission",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        task_git = os.path.join(
+            str(agentic_dir), "worktrees", "tasks", task["id"], ".git")
+        archived = None
+        if root and os.path.exists(task_git):
+            archived = taskspace.archive_and_reset_task_worktree(
+                root, agentic_dir, task["id"], evidence_id)
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_qa_semantic_evidence_blocker",
+            "resolved_blockers": resolved,
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+# -- stale recovered task source ---------------------------------------------
+
+_STALE_FILTER_SOURCE_RE = re.compile(
+    r"^Required real all/active/completed filter behavior is absent from "
+    r"repository source, and the work order only allows editing ", re.I)
+
+
+def recover_stale_filter_source_blocker(agentic_dir, root, scheduler):
+    """A recovered task worktree may predate a dependency that has since
+    landed on agentic/project. Reset only when the current project source
+    demonstrably contains filter behavior and the task worktree does not."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    project_index = os.path.join(
+        str(agentic_dir), "worktrees", "project", "src", "index.js")
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        reason = (task.get("blocking_reason") or "").strip()
+        if task.get("status") != "blocked" or not \
+                _STALE_FILTER_SOURCE_RE.search(reason):
+            continue
+        task_index = os.path.join(
+            str(agentic_dir), "worktrees", "tasks", task["id"],
+            "src", "index.js")
+        try:
+            with open(project_index, encoding="utf-8") as fh:
+                project_source = fh.read()
+            with open(task_index, encoding="utf-8") as fh:
+                task_source = fh.read()
+        except OSError:
+            continue
+        markers = ("data-task-filter", "activeFilter")
+        if not all(marker in project_source for marker in markers) or \
+                all(marker in task_source for marker in markers):
+            continue
+        evidence_id = scheduler.state.get("current_cycle") or "recovery"
+        archived = taskspace.archive_and_reset_task_worktree(
+            root, agentic_dir, task["id"], evidence_id)
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not _STALE_FILTER_SOURCE_RE.search(
+                    (blocker.get("reason") or "").strip()):
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "stale_recovered_task_worktree",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": archived["archived_branch"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "archive_stale_recovered_task_worktree_and_retry",
+            "resolved_blockers": resolved,
+            "run_id": evidence_id,
+            "evidence_ref": archived["archived_branch"],
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+# -- source-plan acceptance fidelity -----------------------------------------
+
+_OVER_SPECIFIC_FILE_URL_CRITERION = (
+    "Application loads locally at file:// URL and renders task list")
+_ORIGINAL_LOCAL_BROWSER_CRITERION = (
+    "The application opens locally in a browser.")
+
+
+def recover_over_specific_file_url_criterion(agentic_dir):
+    """Restore the source plan's acceptance semantics when a legacy architect
+    invented a file:// transport constraint that the plan never requested."""
+    project_path = os.path.join(
+        projstate.project_dir(agentic_dir), "PROJECT.md")
+    try:
+        with open(project_path, encoding="utf-8") as fh:
+            plan = fh.read()
+    except OSError:
+        return []
+    plan_lower = plan.lower()
+    if "file://" in plan_lower or \
+            "the application opens locally in a browser" not in plan_lower:
+        return []
+    criteria = projstate.read_yaml(
+        agentic_dir, "acceptance-criteria.yaml", {}) or {}
+    completion = list(criteria.get("completion_criteria") or [])
+    changed = False
+    for index, criterion in enumerate(completion):
+        if str(criterion).strip() == _OVER_SPECIFIC_FILE_URL_CRITERION:
+            completion[index] = _ORIGINAL_LOCAL_BROWSER_CRITERION
+            changed = True
+    if not changed:
+        return []
+    criteria["completion_criteria"] = completion
+    projstate.write_yaml(agentic_dir, "acceptance-criteria.yaml", criteria)
+    return [{
+        "action": "restore_source_plan_local_browser_criterion",
+        "from": _OVER_SPECIFIC_FILE_URL_CRITERION,
+        "to": _ORIGINAL_LOCAL_BROWSER_CRITERION,
+        "evidence_ref": project_path,
+    }]
+
+
+# -- fixed platform-neutral documentation read check -------------------------
+
+_REPEATED_IDENTICAL_REASONS = {
+    "repeated identical failure (same diff, same errors)",
+    "repeated identical failure — stopping early",
+}
+
+
+def _unix_cat_skip_evidence(agentic_dir, task_id):
+    pattern = os.path.join(str(agentic_dir), "runs", "cycle-*")
+    for cycle_dir in sorted(glob.glob(pattern), reverse=True):
+        order_path = os.path.join(cycle_dir, "work-order.json")
+        try:
+            with open(order_path, encoding="utf-8") as fh:
+                order = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if (order.get("task_id") or order.get("item")) != task_id:
+            continue
+        for path in sorted(glob.glob(os.path.join(
+                cycle_dir, "validation-result-*.json")), reverse=True):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            for result in validation.get("results") or []:
+                command = str(result.get("command") or "")
+                if result.get("skipped_unix_only") and \
+                        re.match(r"^cat\s+[^\s]+$", command):
+                    return {
+                        "run_id": os.path.basename(cycle_dir).replace(
+                            "cycle-", "", 1),
+                        "evidence_ref": path,
+                        "command": command,
+                    }
+        return None
+    return None
+
+
+def recover_platform_neutral_read_blocker(agentic_dir):
+    """Retry documentation work blocked only because legacy Windows gates
+    could not evaluate the safe read-only `cat RELATIVE_FILE` idiom."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        reason = (task.get("blocking_reason") or "").strip()
+        if task.get("status") != "blocked" or \
+                reason not in _REPEATED_IDENTICAL_REASONS:
+            continue
+        evidence = _unix_cat_skip_evidence(agentic_dir, task["id"])
+        if not evidence:
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if (blocker.get("reason") or "").strip() not in \
+                    _REPEATED_IDENTICAL_REASONS:
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "legacy_unix_only_read_check",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": evidence["evidence_ref"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_platform_neutral_read_check_blocker",
+            "resolved_blockers": resolved,
+            **evidence,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+# -- fixed whole-diff secret-scan blocker ------------------------------------
+
+def recover_whole_diff_secret_scan_blocker(agentic_dir):
+    """Retry blockers produced by the legacy whole-patch secret scanner.
+
+    The failed diff was reverted before this state was recorded. Retrying is
+    safe because the replacement scanner still rejects every credential-shaped
+    value on an added line; only removed/context lines cease to block work.
+    """
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or \
+                (task.get("blocking_reason") or "").strip() != \
+                "possible secret in diff":
+            continue
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if (blocker.get("reason") or "").strip() != \
+                    "possible secret in diff":
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "legacy_whole_diff_secret_scan",
+                "platform_owned": True,
+                "retryable": True,
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "reset_whole_diff_secret_scan_blocker",
+            "resolved_blockers": resolved,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
+
+
+# -- underestimated parallel-candidate line budget ---------------------------
+
+_LINE_BUDGET_ONLY_RE = re.compile(
+    r"^scope violations: changed lines (?P<actual>\d+) exceed limit "
+    r"(?P<limit>\d+)$")
+
+
+def recover_underestimated_parallel_line_budget(
+        agentic_dir, root, scheduler):
+    """Retry a medium task when every candidate only exceeded its line budget.
+
+    Recovery is deliberately narrow: every structured candidate cause must be
+    a line-count-only scope violation, every preserved changed path must still
+    fit the backlog-authored expected paths, and the task may be promoted only
+    once (medium -> large). File scope, protected paths, and deterministic
+    checks are never widened.
+    """
+    from . import gitops
+
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    for task in projstate.load_backlog(agentic_dir):
+        if task.get("status") != "blocked" or \
+                task.get("expected_size") != "medium":
+            continue
+        blocker = next((
+            item for item in blockers
+            if not item.get("resolved") and item.get("task") == task["id"] and
+            item.get("code") ==
+            projstate.BLOCKER_CODE_PARALLEL_CANDIDATES_EXHAUSTED
+        ), None)
+        failures_list = (blocker or {}).get("candidate_failures") or []
+        if not failures_list:
+            continue
+
+        parsed = []
+        compatible = True
+        allowed = [
+            bootstrap_gate.normalize_expected_entry(entry)["path"]
+            for entry in task.get("expected_paths") or []
+        ]
+        for candidate in failures_list:
+            match = _LINE_BUDGET_ONLY_RE.match(
+                str(candidate.get("detail") or "").strip())
+            if candidate.get("code") != "candidate_scope_violation" or \
+                    not match:
+                compatible = False
+                break
+            candidate_id = candidate.get("candidate_id")
+            worktree = candidate.get("evidence_ref") or \
+                taskspace.task_worktree_path(agentic_dir, candidate_id)
+            if not candidate_id or \
+                    not os.path.exists(os.path.join(worktree, ".git")):
+                compatible = False
+                break
+            changed = gitops.filter_tool_artifacts(
+                gitops.changed_files(worktree))
+            if not changed or gitops.check_paths(
+                    changed, allowed, [], [], authorised_exceptions=[]):
+                compatible = False
+                break
+            parsed.append({
+                "candidate_id": candidate_id,
+                "actual": int(match.group("actual")),
+                "limit": int(match.group("limit")),
+                "changed_files": changed,
+            })
+        if not compatible or len(parsed) != len(failures_list):
+            continue
+
+        evidence_id = scheduler.state.get("current_cycle") or "recovery"
+        archived = []
+        for candidate in parsed:
+            result = taskspace.archive_and_reset_task_worktree(
+                root, agentic_dir, candidate["candidate_id"], evidence_id)
+            archived.append(result.get("archived_branch"))
+
+        blocker.update({
+            "resolved": True,
+            "resolved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+            "failure_class": "task_budget_underestimated",
+            "platform_owned": True,
+            "retryable": True,
+            "evidence_ref": ", ".join(filter(None, archived)) or None,
+        })
+        projstate.update_task(
+            agentic_dir, task["id"], expected_size="large", status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "promote_task_size_and_retry",
+            "from_expected_size": "medium",
+            "to_expected_size": "large",
+            "resolved_blockers": 1,
+            "run_id": evidence_id,
+            "observed_changed_lines": [item["actual"] for item in parsed],
+            "preserved_allowed_paths": sorted(set(
+                path for item in parsed for path in item["changed_files"])),
+            "archived_branches": archived,
+            "evidence_ref": ", ".join(filter(None, archived)) or None,
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+# -- stale task-branch integration conflict ----------------------------------
+
+def recover_stale_task_integration_blocker(agentic_dir, root, scheduler):
+    """Archive a stale passing task branch and prepare a clean-base retry."""
+    blockers_doc = projstate.read_yaml(
+        agentic_dir, "blockers.yaml", {"blockers": []}) or {"blockers": []}
+    blockers = blockers_doc.get("blockers", [])
+    events = []
+    prefix = "merge conflict integrating task "
+    for task in projstate.load_backlog(agentic_dir):
+        reason = (task.get("blocking_reason") or "").strip()
+        if task.get("status") != "blocked" or not reason.startswith(prefix):
+            continue
+        evidence_id = scheduler.state.get("current_cycle") or "recovery"
+        archived = taskspace.archive_and_reset_task_worktree(
+            root, agentic_dir, task["id"], evidence_id)
+        resolved = 0
+        for blocker in blockers:
+            if blocker.get("resolved") or blocker.get("task") != task["id"]:
+                continue
+            if not (blocker.get("reason") or "").strip().startswith(prefix):
+                continue
+            blocker.update({
+                "resolved": True,
+                "failure_class": "stale_task_worktree_ancestry",
+                "platform_owned": True,
+                "retryable": True,
+                "evidence_ref": archived["archived_branch"],
+            })
+            resolved += 1
+        projstate.update_task(
+            agentic_dir, task["id"], status="pending",
+            blocking_reason=None, last_result=None, attempts=0)
+        events.append({
+            "task_id": task["id"],
+            "action": "archive_stale_task_branch_and_retry",
+            "resolved_blockers": resolved,
+            "evidence_ref": archived["archived_branch"],
+        })
+    if events:
+        projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
+    return events
+
+
 # -- 6. task-state reconciliation -----------------------------------------------
 
 def _task_state_reconciliation(agentic_dir):
-    """A task left `in_progress` with no active file-ownership claim is
-    unambiguously stuck (every normal exit path -- success, `fail()`,
-    stale-owned-process recovery -- releases the claim before the run
-    ends): reset it to pending so the next cycle can pick it up again."""
+    """Repair task/ownership state after interrupted or legacy cycles.
+
+    Besides resetting claim-less in-progress tasks, release claims owned by
+    tasks already marked done. If such a stale claim produced an ownership
+    blocker for a dependent task, resolve that platform blocker and retry it.
+    """
     backlog = projstate.load_backlog(agentic_dir)
     claims = taskspace.active_claims(agentic_dir)
+    by_id = {task["id"]: task for task in backlog}
     reconciled = []
+
+    stale_done = {task_id for task_id in claims
+                  if by_id.get(task_id, {}).get("status") == "done"}
+    for task_id in sorted(stale_done):
+        taskspace.release_claim(agentic_dir, task_id)
+        reconciled.append({
+            "task_id": task_id,
+            "action": "release_done_task_ownership_claim",
+        })
+
     for task in backlog:
         if task["status"] == "in_progress" and task["id"] not in claims:
             projstate.update_task(agentic_dir, task["id"], status="pending")
             reconciled.append({"task_id": task["id"],
                                "action": "reset_in_progress_to_pending"})
+
+    if stale_done:
+        blockers_doc = projstate.read_yaml(
+            agentic_dir, "blockers.yaml", {"blockers": []}) or {
+                "blockers": []}
+        changed = False
+        for task in backlog:
+            reason = str(task.get("blocking_reason") or "")
+            match = re.match(
+                r"^file ownership overlap: task ([^ ]+) already claims ",
+                reason)
+            if task.get("status") != "blocked" or not match or \
+                    match.group(1) not in stale_done:
+                continue
+            resolved = 0
+            for blocker in blockers_doc.get("blockers", []):
+                if blocker.get("task") == task["id"] and \
+                        not blocker.get("resolved") and \
+                        str(blocker.get("reason") or "").startswith(
+                            "file ownership overlap:"):
+                    blocker["resolved"] = True
+                    blocker["resolved_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+                    resolved += 1
+                    changed = True
+            projstate.update_task(
+                agentic_dir, task["id"], status="pending",
+                blocking_reason=None, last_result=None)
+            reconciled.append({
+                "task_id": task["id"],
+                "action": "reset_stale_ownership_blocker",
+                "resolved_blockers": resolved,
+                "former_owner": match.group(1),
+            })
+        if changed:
+            projstate.write_yaml(agentic_dir, "blockers.yaml", blockers_doc)
     return reconciled
 
 
@@ -96,6 +1004,13 @@ def _is_legacy_platform_cycle_detail(detail_text):
         return True
     if bootstrap_gate._is_legacy_expected_paths_contract_block(   # noqa: SLF001
             {"blocking_reason": text}):
+        return True
+    if _is_windows_codex_readonly_detail(text):
+        return True
+    if _QA_MISSING_TASK_GATE_RE.search(text):
+        return True
+    if text.startswith(
+            "integration failed: merge conflict integrating task "):
         return True
     return False
 
@@ -137,9 +1052,10 @@ def reconstruct_failure_streak(agentic_dir, scheduler):
             continue   # never affected the streak in the first place
         run_id = event.get("run_id")
         classified = classified_by_run.get(run_id)
-        is_platform = bool(classified.get("platform_class")) \
-            if classified is not None \
-            else _is_legacy_platform_cycle_detail(event.get("detail"))
+        # Known persisted platform signatures remain authoritative even when
+        # an older classifier incorrectly recorded platform_class=false.
+        is_platform = _is_legacy_platform_cycle_detail(event.get("detail")) or \
+            bool(classified and classified.get("platform_class"))
         record = {"run_id": run_id, "task": event.get("task_id"),
                  "outcome": outcome, "detail": event.get("detail")}
         (platform_removed if is_platform else genuine).append(record)
@@ -198,23 +1114,86 @@ def run_recovery(cfg, agentic_dir, root, scheduler, clock, log):
     stages["stale_lease_recovery"] = _stale_lease_recovery(
         agentic_dir, cfg, clock)
 
+    windows_codex_events = recover_windows_codex_readonly_blocker(
+        agentic_dir, cfg)
+    windows_command_events = recover_windows_command_resolution_blocker(
+        agentic_dir, cfg)
+    memory_dir = os.path.join(str(agentic_dir), "memory")
+    task_gate_events = recover_missing_task_gate_blocker(
+        agentic_dir, cfg, memory_dir)
+    qa_evidence_events = recover_qa_semantic_evidence_blocker(
+        agentic_dir, root=root,
+        evidence_id=scheduler.state.get("current_cycle") or "recovery")
+    stale_source_events = recover_stale_filter_source_blocker(
+        agentic_dir, root, scheduler)
+    foreign_pytest_events = recover_foreign_pytest_autodetection_blocker(
+        agentic_dir, root=root,
+        evidence_id=scheduler.state.get("current_cycle") or "recovery")
+    read_check_events = recover_platform_neutral_read_blocker(agentic_dir)
+    secret_scan_events = recover_whole_diff_secret_scan_blocker(agentic_dir)
+    integration_events = recover_stale_task_integration_blocker(
+        agentic_dir, root, scheduler)
+    line_budget_events = recover_underestimated_parallel_line_budget(
+        agentic_dir, root, scheduler)
     migrated = list(bootstrap_gate.recover_bootstrap_deadlock(agentic_dir))
     migrated += list(bootstrap_gate.recover_expected_paths_contract_bug(
         agentic_dir))
+    migrated += windows_codex_events
+    migrated += windows_command_events
+    migrated += task_gate_events
     stages["blocker_code_migration"] = _stage("blocker_code_migration",
                                               migrated)
 
     aggregate_events = parallel_recovery.recover_parallel_candidate_aggregate(
         agentic_dir)
-    memory_dir = os.path.join(str(agentic_dir), "memory")
+    for event in (windows_command_events + task_gate_events +
+                  qa_evidence_events + stale_source_events +
+                  foreign_pytest_events + read_check_events +
+                  line_budget_events):
+        action = event.get("action")
+        if action == "reset_windows_command_resolution_blocker":
+            failure_class = "platform_capability_missing"
+        elif action == "reset_qa_semantic_evidence_blocker":
+            failure_class = "legacy_qa_evidence_omission"
+        elif action == "archive_stale_recovered_task_worktree_and_retry":
+            failure_class = "stale_recovered_task_worktree"
+        elif action == "reset_platform_neutral_read_check_blocker":
+            failure_class = "legacy_unix_only_read_check"
+        elif action == "reset_foreign_pytest_autodetection_blocker":
+            failure_class = "foreign_test_framework_autodetected"
+        elif action == "promote_task_size_and_retry":
+            failure_class = "task_budget_underestimated"
+        else:
+            failure_class = "task_contract_invalid"
+        logs.decision(memory_dir, {
+            "event": "failure_classified",
+            "run_id": event["run_id"],
+            "task_id": event["task_id"],
+            "failure_class": failure_class,
+            "platform_class": True,
+            "corrected_by": action,
+            "evidence_ref": event["evidence_ref"],
+        })
     contract_events = contract_recovery.recover_contract_divergence_blockers(
         agentic_dir, memory_dir, cfg)
+    contract_events += \
+        contract_recovery.recover_fixed_contract_comparison_blockers(
+            agentic_dir, memory_dir, cfg)
+    contract_events += \
+        contract_recovery.recover_stable_contract_authority_blockers(
+            agentic_dir, memory_dir, cfg)
+    plan_fidelity_events = recover_over_specific_file_url_criterion(
+        agentic_dir)
     stages["aggregate_candidate_cause_reconstruction"] = _stage(
         "aggregate_candidate_cause_reconstruction", aggregate_events)
     stages["fixed_platform_defect_recovery"] = _stage(
         "fixed_platform_defect_recovery",
         [e for e in aggregate_events if e.get("recovered")] +
-        contract_events)
+        contract_events + windows_codex_events + windows_command_events +
+        task_gate_events + qa_evidence_events + stale_source_events +
+        foreign_pytest_events + read_check_events + secret_scan_events +
+        integration_events + line_budget_events +
+        plan_fidelity_events)
 
     stages["task_state_reconciliation"] = _stage(
         "task_state_reconciliation",

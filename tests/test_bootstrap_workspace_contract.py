@@ -360,7 +360,7 @@ def test_required_directory_created_via_mkdir_in_full_cycle(sandbox):
     assert result["status"] == "success"
 
 
-def test_impossible_task_contract_rejected_before_backend_invocation(
+def test_required_output_is_restored_to_write_scope_before_dispatch(
         sandbox):
     project_cfg(sandbox)
     sandbox["cfg"]["verification"]["commands"] = []
@@ -371,18 +371,20 @@ def test_impossible_task_contract_rejected_before_backend_invocation(
     test_setup = simple_task("t2-tests", kind="test_setup",
                              dependencies=["t1-first"])
     seed_project(sandbox, [task, test_setup])
-    caller = std_caller(task)
-    # the conductor scopes allowed_paths to something that can NEVER
-    # cover the required expected output -- an impossible contract
-    caller.by_role["conductor"] = [proj_order(task,
-                                              allowed_paths=["docs/**"])]
+    caller = std_caller(task, coder=worker_out(edits=[{
+        "path": "src/index.js", "action": "write",
+        "content": "export const READY = true;\n"}]))
+    caller.by_role["conductor"] = [proj_order(
+        task, allowed_paths=["docs/**"])]
+
     result = cycle(sandbox, caller, Clock())
-    assert result["status"] == "failure"
-    assert not [c for c in caller.calls if c["role"] == "coder"]
+
+    assert result["status"] == "success"
+    coder_call = next(c for c in caller.calls if c["role"] == "coder")
+    assert "src/index.js" in \
+        coder_call["input"]["work_order"]["allowed_paths"]
     tasks = projstate.load_backlog(str(sandbox["agentic"]))
-    assert tasks[0]["status"] == "blocked"
-    assert "platform_invalid" in tasks[0]["blocking_reason"]
-    assert "not coverable by allowed_paths" in tasks[0]["blocking_reason"]
+    assert tasks[0]["status"] == "done"
 
 
 def test_structural_success_reports_tests_not_configured_yet(sandbox):

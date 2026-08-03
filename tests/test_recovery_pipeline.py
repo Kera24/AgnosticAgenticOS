@@ -70,6 +70,122 @@ def test_recovery_pipeline_is_idempotent(sandbox):
     assert tasks["t1-init-repo"]["status"] == "pending"
 
 
+def test_windows_codex_readonly_signatures_include_specialist_role_failures():
+    details = [
+        "Workspace filesystem is read-only, so required edits to "
+        "src/index.js and tests/ui.test.js cannot be made.",
+        "Workspace filesystem is read-only, so required edits within "
+        "allowed_paths cannot be made",
+    ]
+    assert all(recovery._is_windows_codex_readonly_detail(d)
+               for d in details)
+    assert not recovery._is_windows_codex_readonly_detail(
+        "Repository policy intentionally makes this workspace read-only")
+
+
+def test_recovery_clears_fixed_windows_codex_readonly_blocker(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    sandbox["cfg"].setdefault("backends", {})["codex"] = {
+        "type": "cli", "kind": "codex",
+        "binary": "C:/complete/codex.exe",
+        "ignore_user_config": False,
+    }
+    monkeypatch.setattr(recovery, "_is_native_windows", lambda: True)
+    task = simple_task("t1-init-repo", kind="bootstrap")
+    seed_project(sandbox, [task])
+    a = str(sandbox["agentic"])
+    reason = ("Workspace is read-only, so the required scaffold files and "
+              "directories cannot be created.")
+    projstate.update_task(a, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(a, task["id"], reason, code=None,
+                          human_only=False)
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], a, str(sandbox["repo"]), _scheduler(sandbox),
+        Clock(), log=lambda e: None)
+
+    tasks = {t["id"]: t for t in projstate.load_backlog(a)}
+    assert tasks[task["id"]]["status"] == "pending"
+    assert tasks[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(a) == []
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    assert any(e["task_id"] == task["id"] for e in events)
+
+
+def test_windows_codex_readonly_signature_overrides_stale_false_classification(
+        sandbox):
+    project_cfg(sandbox)
+    seed_project(sandbox, [simple_task()])
+    a = str(sandbox["agentic"])
+    memdir = str(sandbox["agentic"] / "memory")
+    reason = ("Workspace is read-only, so the required scaffold files and "
+              "directories cannot be created.")
+    _write_cycle(memdir, "r1", "success", "ok")
+    _write_cycle(memdir, "r2", "failure", reason,
+                 failure_class="workspace_policy_denied", platform=False)
+    scheduler = _scheduler(sandbox)
+    scheduler.state["failure_streak"] = 1
+    scheduler.save()
+
+    report = recovery.reconstruct_failure_streak(a, scheduler)
+
+    assert report["resulting_streak"] == 0
+    assert [r["run_id"] for r in report["removed_platform_failures"]] == [
+        "r2"]
+
+
+def test_recovery_uses_gate_artifact_for_fixed_windows_npm_resolution(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task = simple_task("t1-init-repo", kind="bootstrap")
+    seed_project(sandbox, [task])
+    a = str(sandbox["agentic"])
+    reason = "repair attempts exhausted"
+    projstate.update_task(a, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(a, task["id"], reason, code=None,
+                          human_only=False)
+
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r2"
+    run_dir.mkdir(parents=True)
+    (run_dir / "work-order.json").write_text(
+        json.dumps({"item": task["id"]}), encoding="utf-8")
+    (run_dir / "validation-result-3.json").write_text(json.dumps({
+        "ok": False,
+        "results": [{
+            "name": "npm-test",
+            "command": "npm run test --silent",
+            "exit_code": 127,
+            "detail": "command not found: npm",
+        }],
+    }), encoding="utf-8")
+
+    memdir = str(sandbox["agentic"] / "memory")
+    _write_cycle(memdir, "r1", "success", "ok")
+    _write_cycle(memdir, "r2", "failure", reason,
+                 failure_class="deterministic_check_failed", platform=False)
+    scheduler = _scheduler(sandbox)
+    scheduler.state["failure_streak"] = 1
+    scheduler.save()
+    monkeypatch.setattr(recovery, "_is_native_windows", lambda: True)
+    monkeypatch.setattr(
+        recovery, "_windows_command_available", lambda command: command == "npm")
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], a, str(sandbox["repo"]), scheduler, Clock(),
+        log=lambda e: None)
+
+    tasks = {t["id"]: t for t in projstate.load_backlog(a)}
+    assert tasks[task["id"]]["status"] == "pending"
+    assert projstate.open_blockers(a) == []
+    assert stages["failure_streak_reconciliation"]["resulting_streak"] == 0
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    assert any(e["action"] ==
+               "reset_windows_command_resolution_blocker" for e in events)
+
+
 # -- item 6: failure-streak reconciliation --------------------------------------
 
 def _write_cycle(memdir, run_id, outcome, detail, failure_class=None,
@@ -287,3 +403,231 @@ def test_set_override_is_in_memory_only_never_touches_config_files():
     assert cfg["parallelism"]["max_agents_global"] == 1
     after = config_path.read_bytes()
     assert before == after   # never persisted to disk
+
+
+def test_recovery_resets_blocker_when_artifacts_prove_task_gate_omitted(
+        sandbox):
+    project_cfg(sandbox)
+    task = simple_task("t5-task-list-renderer")
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = ("QA: behavior passed, but the required deterministic UI gate "
+              "is not evidenced in the supplied check results")
+    projstate.update_task(agentic_dir, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(agentic_dir, task["id"], reason, code=None,
+                          human_only=False)
+
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r5"
+    run_dir.mkdir(parents=True)
+    (run_dir / "task-contract.json").write_text(json.dumps({
+        "task_id": task["id"],
+        "run_id": "r5",
+        "deterministic_checks": [
+            "node -e \"require('./dist/tests/t5-ui')\""],
+    }), encoding="utf-8")
+    (run_dir / "validation-result-1.json").write_text(json.dumps({
+        "ok": True,
+        "results": [{
+            "name": "pytest",
+            "command": "python -m pytest -q",
+            "passed": True,
+        }],
+    }), encoding="utf-8")
+
+    events = recovery.recover_missing_task_gate_blocker(
+        agentic_dir, sandbox["cfg"],
+        str(sandbox["agentic"] / "memory"))
+
+    current = {t["id"]: t for t in projstate.load_backlog(agentic_dir)}
+    assert current[task["id"]]["status"] == "pending"
+    assert current[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(agentic_dir) == []
+    assert events[0]["run_id"] == "r5"
+    assert events[0]["missing_commands"] == [
+        "node -e \"require('./dist/tests/t5-ui')\""]
+
+
+
+def test_recovery_retries_legacy_whole_diff_secret_scan_blocker(sandbox):
+    project_cfg(sandbox)
+    task = simple_task("t5-task-list-renderer")
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = "possible secret in diff"
+    projstate.update_task(
+        agentic_dir, task["id"], status="blocked",
+        blocking_reason=reason, last_result="failure", attempts=1)
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason, code=None, human_only=False)
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], agentic_dir, str(sandbox["repo"]),
+        _scheduler(sandbox), Clock(), log=lambda event: None)
+
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["status"] == "pending"
+    assert restored[task["id"]]["blocking_reason"] is None
+    assert restored[task["id"]]["attempts"] == 0
+    assert projstate.open_blockers(agentic_dir) == []
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    assert any(
+        event.get("action") == "reset_whole_diff_secret_scan_blocker"
+        and event.get("task_id") == task["id"]
+        for event in events)
+
+
+
+def test_recovery_archives_stale_task_branch_after_merge_conflict(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task = simple_task("t5-task-list-renderer")
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = (
+        "merge conflict integrating task t5-task-list-renderer; "
+        "task worktree preserved as evidence")
+    projstate.update_task(
+        agentic_dir, task["id"], status="blocked",
+        blocking_reason=reason, last_result="failure", attempts=1)
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason, code=None, human_only=False)
+    scheduler = _scheduler(sandbox)
+    scheduler.state["current_cycle"] = "run-merge"
+    scheduler.save()
+    calls = []
+
+    def archive(root, runtime_dir, task_id, evidence_id):
+        calls.append((root, runtime_dir, task_id, evidence_id))
+        return {
+            "archived_branch":
+                "agentic/evidence/t5-task-list-renderer-run-merge",
+            "removed": "old-worktree",
+        }
+
+    monkeypatch.setattr(
+        recovery.taskspace, "archive_and_reset_task_worktree", archive)
+
+    stages = recovery.run_recovery(
+        sandbox["cfg"], agentic_dir, str(sandbox["repo"]),
+        scheduler, Clock(), log=lambda event: None)
+
+    assert calls and calls[0][2:] == (
+        task["id"], "run-merge")
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["status"] == "pending"
+    assert restored[task["id"]]["blocking_reason"] is None
+    assert restored[task["id"]]["attempts"] == 0
+    assert projstate.open_blockers(agentic_dir) == []
+    events = stages["fixed_platform_defect_recovery"]["events"]
+    event = next(
+        item for item in events
+        if item.get("action") == "archive_stale_task_branch_and_retry")
+    assert event["evidence_ref"] == (
+        "agentic/evidence/t5-task-list-renderer-run-merge")
+
+
+def test_merge_conflict_cycle_is_platform_failure_for_streak_recovery():
+    detail = (
+        "integration failed: merge conflict integrating task "
+        "t5-task-list-renderer; task worktree preserved as evidence")
+    assert recovery._is_legacy_platform_cycle_detail(detail)
+
+
+
+def _seed_line_budget_blocker(sandbox, mixed=False):
+    task = simple_task(
+        "t3-converter-interface", expected_size="medium",
+        expected_paths=["index.html", "src/**", "tests/**"])
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = (
+        "parallel candidates exhausted: all 2 candidate(s) disqualified "
+        "(candidate 1 and candidate 2 exceeded line budget)")
+    failures = []
+    for index, actual in enumerate((430, 489), 1):
+        candidate_id = task["id"] if index == 1 else task["id"] + "--c2"
+        worktree = sandbox["agentic"] / "worktrees" / "tasks" / candidate_id
+        (worktree / ".git").mkdir(parents=True)
+        failures.append({
+            "candidate_id": candidate_id,
+            "failure_class": "model_output_invalid",
+            "code": ("candidate_scope_violation" if not mixed or index == 1
+                     else "candidate_deterministic_check_failed"),
+            "platform_owned": False,
+            "retryable": True,
+            "evidence_ref": str(worktree),
+            "detail": (
+                "scope violations: changed lines %d exceed limit 320" % actual
+                if not mixed or index == 1 else "npm test failed"),
+        })
+    projstate.update_task(
+        agentic_dir, task["id"], status="blocked",
+        blocking_reason=reason, last_result="failure", attempts=1)
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason,
+        code=projstate.BLOCKER_CODE_PARALLEL_CANDIDATES_EXHAUSTED,
+        failure_class="model_output_invalid", platform_owned=False,
+        retryable=True, candidate_failures=failures)
+    return task, failures
+
+
+def test_recovery_promotes_medium_task_when_all_candidates_only_exceed_budget(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task, failures = _seed_line_budget_blocker(sandbox)
+    agentic_dir = str(sandbox["agentic"])
+    scheduler = _scheduler(sandbox)
+    scheduler.state["current_cycle"] = "run-budget"
+    scheduler.save()
+
+    from core import gitops
+    changed = ["index.html", "src/app.js", "src/styles.css",
+               "tests/interface.test.js"]
+    monkeypatch.setattr(gitops, "changed_files", lambda worktree: changed)
+    archived = []
+
+    def archive(root, runtime_dir, candidate_id, evidence_id):
+        archived.append((candidate_id, evidence_id))
+        return {"archived_branch":
+                "agentic/evidence/%s-%s" % (candidate_id, evidence_id)}
+
+    monkeypatch.setattr(
+        recovery.taskspace, "archive_and_reset_task_worktree", archive)
+
+    events = recovery.recover_underestimated_parallel_line_budget(
+        agentic_dir, str(sandbox["repo"]), scheduler)
+
+    assert [item[0] for item in archived] == [
+        task["id"], task["id"] + "--c2"]
+    assert all(item[1] == "run-budget" for item in archived)
+    assert events[0]["observed_changed_lines"] == [430, 489]
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["expected_size"] == "large"
+    assert restored[task["id"]]["status"] == "pending"
+    assert restored[task["id"]]["attempts"] == 0
+    assert projstate.open_blockers(agentic_dir) == []
+
+
+def test_line_budget_recovery_rejects_mixed_candidate_failures(
+        sandbox, monkeypatch):
+    project_cfg(sandbox)
+    task, failures = _seed_line_budget_blocker(sandbox, mixed=True)
+    agentic_dir = str(sandbox["agentic"])
+    from core import gitops
+    monkeypatch.setattr(
+        gitops, "changed_files",
+        lambda worktree: ["index.html", "src/app.js"])
+
+    events = recovery.recover_underestimated_parallel_line_budget(
+        agentic_dir, str(sandbox["repo"]), _scheduler(sandbox))
+
+    assert events == []
+    restored = {
+        item["id"]: item for item in projstate.load_backlog(agentic_dir)}
+    assert restored[task["id"]]["expected_size"] == "medium"
+    assert restored[task["id"]]["status"] == "blocked"
+    assert len(projstate.open_blockers(agentic_dir)) == 1

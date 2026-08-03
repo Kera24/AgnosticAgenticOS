@@ -16,7 +16,7 @@ import re
 from . import backends, bootstrap_gate, capacity as capacity_mod
 from . import config as config_mod, contract as contract_mod
 from . import contract_recovery
-from . import decision_policy, execengine, failures, fscap
+from . import decision_policy, execengine, failures, featuregates, fscap
 from . import inventory as inventory_mod
 from . import parallel as parallel_mod
 from . import parallel_recovery
@@ -25,7 +25,7 @@ from . import supervisor as supervisor_mod
 from . import errors, gate, gitops, logs, notify, projstate
 from .breaker import BreakerBoard
 from .orchestrator import (apply_edits, load_prompt, _schema, _snapshot)
-from .redact import looks_like_secret, redact
+from .redact import looks_like_secret_in_diff, redact
 from .scheduler import Scheduler
 
 SECURITY_PATH_TRIGGERS = [
@@ -450,6 +450,17 @@ def _finish_cycle(cfg, p, scheduler, ledger, log, run_id, task, backend,
          "detail": redact(str(detail))[:300],
          "cooling_until": until.isoformat(timespec="seconds"),
          "cooling_detail": cooling_detail})
+    try:
+        gate_events = featuregates.FeatureGateRegistry(
+            p["memory"], cfg).record_outcome(
+                run_id, outcome,
+                platform_failure=failures.is_platform_class(failure_class),
+                detail=detail)
+        for event in gate_events:
+            log(dict(event, event="feature_gate_rollback", run_id=run_id))
+    except Exception as exc:  # evidence must never alter cycle outcome
+        log({"event": "feature_gate_outcome_failed", "run_id": run_id,
+             "detail": str(exc)[:200]})
     progress = projstate.refresh_progress(p["agentic"])
     from .knowledge import update_knowledge
     update_knowledge(cfg, p["agentic"], log)
@@ -656,9 +667,17 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
 
     # conductor -------------------------------------------------------------------
     project_worktree = ensure_project_worktree(cfg, p)
+    feature_registry = featuregates.FeatureGateRegistry(p["memory"], cfg)
+    amendment_gate = feature_registry.decision(
+        "contract_amendments", cfg.get("project", {}).get("name"))
+    contract_seed = contract_mod.build_task_contract(
+        task, {}, cfg.get("project", {}).get("name"), run_id=run_id)
     conducted = caller(
         "conductor", load_prompt("project-conductor.md", shared=False),
         {"task": task,
+         "task_contract": contract_seed,
+         "contract_authority": "backlog",
+         "feature_gates": {"contract_amendments": amendment_gate},
          "architecture": (projstate.read_yaml(a, "progress.yaml", {}) or {}),
          "repository_files": _snapshot(project_worktree,
                                        ["**"])["file_list"][:300],
@@ -673,7 +692,24 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     else "failure", "conductor failed: %s" % kind, retry,
                     failure_class=failures.EXECUTION_TIMEOUT
                     if kind == "timeout" else None)
-    order = conducted["structured_output"]
+    proposed_order = conducted["structured_output"]
+    _persist_evidence(run_dir, "conductor-work-order.json", proposed_order)
+    amendment_policy = task.get("contract_amendment_policy") or {}
+    if amendment_gate.get("observe_only") and \
+            amendment_policy.get("enabled") is True and \
+            not proposed_order.get("contract_amendments"):
+        return fail(
+            "failure",
+            "conductor omitted required shadow contract-amendment probe",
+            failure_class=failures.MODEL_OUTPUT_INVALID)
+    feature_registry.begin_run(
+        run_id, {"contract_amendments": amendment_gate}
+        if proposed_order.get("contract_amendments") else {})
+    _persist_evidence(
+        run_dir, "feature-gates.json",
+        {"contract_amendments": amendment_gate})
+    order = contract_mod.canonicalize_work_order(
+        task, proposed_order, feature_gate=amendment_gate)
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
         json.dump(order, fh, indent=2)
@@ -692,6 +728,21 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
     worker_role = _worker_role(task, order)
     order = _enrich_work_order_safe(cfg, p, a, order, task, worker_role,
                                     capability_plan, ledger, log, run_id)
+    # Capability/skill enrichment may attach execution metadata, but stable
+    # contract authority is re-applied afterward so no extension can mutate
+    # outputs, acceptance criteria, checks, or their writable coverage.
+    order = contract_mod.canonicalize_work_order(
+        task, order, feature_gate=amendment_gate)
+    with open(os.path.join(run_dir, "contract-amendments.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({
+            "authority": order.get("contract_authority"),
+            "feature_gate": amendment_gate,
+            "policy": task.get("contract_amendment_policy") or {
+                "enabled": False},
+            "proposals": order.get("contract_amendments") or [],
+            "decisions": order.get("contract_amendment_decisions") or [],
+        }, fh, indent=2, default=str)
     with open(os.path.join(run_dir, "work-order.json"), "w",
               encoding="utf-8") as fh:
         json.dump(order, fh, indent=2)
@@ -993,9 +1044,16 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                             "instruction": "revert or move out-of-scope changes"}
                 continue
 
-            gate_result = gate.run_checks(cfg, worktree,
-                                          os.path.join(run_dir,
-                                                       "checks-%d" % coder_calls))
+            bootstrap_ok, _bootstrap_reason = \
+                bootstrap_gate.bootstrap_eligible(
+                    task, projstate.load_backlog(a),
+                    bootstrap_gate.decisions_text(a))
+            task_checks = [] if bootstrap_ok else \
+                (task_contract.get("deterministic_checks") or [])
+            gate_result = gate.run_checks(
+                cfg, worktree,
+                os.path.join(run_dir, "checks-%d" % coder_calls),
+                required_commands=task_checks)
             if gate_result["no_checks"]:
                 # "no checks configured" is NEVER a pass -- but a task the
                 # architect itself classified as bootstrap/scaffolding, in a
@@ -1181,7 +1239,7 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                         % (sec_out or {}).get("reason", sec_verdict)[:200])
 
     # cycle commit + integration into agentic/project ------------------------------
-    if looks_like_secret(diff):
+    if looks_like_secret_in_diff(diff):
         _revert_worktree(worktree)
         return fail("failure", "diff appears to contain a secret", block=True,
                     blocking_reason="possible secret in diff")
@@ -1211,6 +1269,10 @@ def _run_cycle_locked(cfg, p, ledger, board, scheduler, caller, log,
                     block=True, blocking_reason=exc.detail[:200])
     taskspace.cleanup_task_worktree(p["root"], a, integration_task_id,
                                     success=True)
+    # Parallel candidates have their own integration id, but ownership is
+    # always claimed under the canonical backlog task id. Release both so a
+    # successful task can never block a dependent task that shares files.
+    taskspace.release_claim(a, task["id"])
     _index_project(cfg, project_worktree, p["memory"], log, full=False,
                    changed=changed)
     _record_capability_evidence_safe(a, order, task, gate_result, log,
@@ -1454,8 +1516,17 @@ def _review_input(order, worktree, gate_result, task=None):
             "deterministic_checks": {
                 "ok": gate_result["ok"],
                 "tests": gate_result.get("tests", "not_configured_yet"),
-                "results": [{k: r[k] for k in ("name", "passed", "mandatory")}
-                            for r in gate_result["results"]]}}
+                "results": [
+                    {"name": r["name"],
+                     "passed": r["passed"],
+                     "mandatory": r["mandatory"],
+                     "command": r.get("command"),
+                     # Preserve bounded semantic evidence (for example named
+                     # subtests) so QA can judge coverage instead of seeing
+                     # only a boolean. Keep the cap small enough that a noisy
+                     # suite cannot consume the reviewer context budget.
+                     "detail": (r.get("detail") or "")[:1200]}
+                    for r in gate_result["results"]]}}
 
 
 def _handoff_payload(order, worktree, gate_result, remaining_chain):
@@ -1521,6 +1592,128 @@ def project_resume(cfg):
 
 # -- final audit --------------------------------------------------------------------------
 
+
+def _historical_task_evidence(runs_dir, limit=20):
+    """Collect bounded, successful canonical task-check evidence for final QA.
+
+    The newest successful validation per task wins. Only task-specific checks
+    are included, preventing auto-detected suite noise from consuming the
+    final review context.
+    """
+    evidence = {}
+    try:
+        cycle_names = sorted(
+            (name for name in os.listdir(runs_dir)
+             if name.startswith("cycle-")), reverse=True)
+    except OSError:
+        return []
+    for cycle_name in cycle_names:
+        cycle_dir = os.path.join(runs_dir, cycle_name)
+        contract_path = os.path.join(cycle_dir, "task-contract.json")
+        try:
+            with open(contract_path, encoding="utf-8") as fh:
+                contract = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        task_id = contract.get("task_id")
+        if not task_id or task_id in evidence:
+            continue
+        required = set(str(command) for command in
+                       contract.get("deterministic_checks") or [])
+        try:
+            validation_names = sorted(
+                (name for name in os.listdir(cycle_dir)
+                 if name.startswith("validation-result-") and
+                 name.endswith(".json")), reverse=True)
+        except OSError:
+            continue
+        for validation_name in validation_names:
+            try:
+                with open(os.path.join(cycle_dir, validation_name),
+                          encoding="utf-8") as fh:
+                    validation = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if not validation.get("ok"):
+                continue
+            checks = []
+            for result in validation.get("results") or []:
+                command = str(result.get("command") or "")
+                if not result.get("passed") or not result.get("mandatory"):
+                    continue
+                if not (str(result.get("name") or "").startswith(
+                        "task-deterministic-") or command in required):
+                    continue
+                checks.append({
+                    "name": result.get("name"),
+                    "command": command,
+                    "passed": True,
+                    "detail": (str(result.get("detail") or ""))[-1200:],
+                })
+            if checks:
+                evidence[task_id] = {
+                    "task_id": task_id,
+                    "run_id": contract.get("run_id") or
+                              cycle_name.replace("cycle-", "", 1),
+                    "acceptance_criteria":
+                        contract.get("acceptance_criteria") or [],
+                    "checks": checks[:2],
+                }
+                break
+        if len(evidence) >= limit:
+            break
+    return [evidence[key] for key in sorted(evidence)]
+
+
+def _final_audit_failure_details(checks, gate_result, dirty_paths=None,
+                                 completion_contract=None, review=None):
+    """Build bounded, persisted explanations for every failed audit gate."""
+    details = []
+    for result in (gate_result or {}).get("results", []):
+        if result.get("mandatory") and not result.get("passed"):
+            name = result.get("name") or "deterministic-check"
+            check = ("local_browser_smoke"
+                     if name == "local-static-app-smoke"
+                     else "deterministic_checks_pass")
+            details.append({
+                "check": check, "name": name,
+                "command": result.get("command"),
+                "exit_code": result.get("exit_code"),
+                "kind": result.get("kind"),
+                "detail": (result.get("detail") or "check failed")[-2000:],
+            })
+    explained = {item["check"] for item in details}
+    generic = {
+        "backlog_complete": "project backlog is not complete",
+        "all_milestones_done": "one or more milestones are not done",
+        "no_open_blockers": "one or more project blockers remain open",
+        "local_browser_smoke": "local browser smoke check failed",
+        "deterministic_checks_pass":
+            "one or more mandatory deterministic checks failed",
+        "no_uncommitted_changes":
+            "uncommitted project changes remain: %s" %
+            ", ".join((dirty_paths or [])[:20]),
+        "no_committed_secrets":
+            "committed diff matched the secret-scanning policy",
+        "env_example_present":
+            "environment variables are used but .env.example is missing",
+        "completion_contract_verified":
+            "completion contract has unverified requirements: %s" %
+            ", ".join(str(item) for item in
+                      (completion_contract or {}).get("unverified", [])[:20]),
+        "final_independent_review":
+            ("independent reviewer did not return a passing verdict"
+             if not review else
+             "independent reviewer verdict: %s" % review.get("verdict")),
+    }
+    for check, passed in checks.items():
+        if not passed and check not in explained:
+            details.append({"check": check, "name": check, "command": None,
+                            "exit_code": None, "kind": "audit",
+                            "detail": generic.get(check, "audit check failed")})
+    return details
+
+
 def final_audit(cfg, caller=None, overrides=None, clock=None,
                 _preloaded=None, **kw):
     """Completion requires evidence, not an empty backlog."""
@@ -1536,6 +1729,12 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     worktree = ensure_project_worktree(cfg, p)
     progress = projstate.refresh_progress(a)
     criteria = projstate.read_yaml(a, "acceptance-criteria.yaml", {}) or {}
+    try:
+        with open(os.path.join(projstate.project_dir(a), "PROJECT.md"),
+                  encoding="utf-8") as fh:
+            source_plan = fh.read()[-6000:]
+    except OSError:
+        source_plan = ""
     checks = {}
     checks["backlog_complete"] = progress.get("backlog_complete", False)
     checks["all_milestones_done"] = bool(progress.get("milestones")) and all(
@@ -1543,6 +1742,17 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     checks["no_open_blockers"] = not projstate.open_blockers(a)
     gate_result = gate.run_checks(cfg, worktree,
                                   os.path.join(p["runs"], "final-audit"))
+    completion_criteria = criteria.get("completion_criteria", [])
+    needs_local_browser_smoke = any(
+        "browser" in str(item).lower() and
+        ("open" in str(item).lower() or "load" in str(item).lower())
+        for item in completion_criteria)
+    if needs_local_browser_smoke:
+        browser_smoke = gate.run_local_static_app_smoke(worktree)
+        gate_result["results"].append(browser_smoke)
+        if browser_smoke["mandatory"] and not browser_smoke["passed"]:
+            gate_result["ok"] = False
+        checks["local_browser_smoke"] = browser_smoke["passed"]
     checks["deterministic_checks_pass"] = gate_result["ok"] and \
         not gate_result["no_checks"]
     # running the deterministic checks just above is itself what can
@@ -1556,13 +1766,14 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     diff_all = gitops.run_git(["log", "-p", "--max-count=50",
                                PROJECT_BRANCH, "--", "."],
                               cwd=worktree, check=False)
-    checks["no_committed_secrets"] = not looks_like_secret(diff_all)
+    checks["no_committed_secrets"] = not looks_like_secret_in_diff(diff_all)
     checks["env_example_present"] = (
         not _needs_env(worktree) or
         os.path.exists(os.path.join(worktree, ".env.example")))
     completion_contract = _build_completion_contract_safe(
         a, criteria.get("requirements_map", []), log)
     checks["completion_contract_verified"] = completion_contract["complete"]
+    task_evidence = _historical_task_evidence(p["runs"])
     review = None
     if all(checks.values()) and caller is not None:
         # the final auditor gets its own routing chain when the capability
@@ -1585,13 +1796,19 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
                                        "allowed_paths": ["**"],
                                        "spec": "independent final review"},
                         "progress": progress,
+                        "source_plan": source_plan,
+                        "completion_contract": completion_contract,
+                        "historical_task_evidence": task_evidence,
                         "deterministic_checks": {
                             "ok": gate_result["ok"],
-                            "results": [
-                                {k: r[k] for k in ("name", "passed",
-                                                   "mandatory")}
-                                for r in gate_result["results"]]},
-                        "diff": "final audit: see repository state",
+                            "results": [{
+                                "name": r["name"],
+                                "passed": r["passed"],
+                                "mandatory": r["mandatory"],
+                                "command": r.get("command"),
+                                "detail": (r.get("detail") or "")[-1200:],
+                            } for r in gate_result["results"]]},
+                        "diff": "final audit: live project state is authoritative",
                         "changed_files": []},
                        schema=_schema("verification.schema.json"),
                        workspace=worktree, permissions="read",
@@ -1602,11 +1819,29 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
     else:
         checks["final_independent_review"] = False
     complete = all(checks.values())
+    deterministic_evidence = {
+        "ok": gate_result.get("ok", False),
+        "no_checks": gate_result.get("no_checks", False),
+        "auto_detected": gate_result.get("auto_detected", False),
+        "results": [{
+            "name": r.get("name"), "passed": r.get("passed"),
+            "mandatory": r.get("mandatory"), "command": r.get("command"),
+            "exit_code": r.get("exit_code"), "kind": r.get("kind"),
+            "detail": (r.get("detail") or "")[-2000:],
+        } for r in gate_result.get("results", [])],
+    }
+    failure_details = _final_audit_failure_details(
+        checks, gate_result, dirty_paths=dirty_paths,
+        completion_contract=completion_contract, review=review)
     audit = {"completed_at": _dt.datetime.now().isoformat(timespec="seconds"),
              "complete": complete, "checks": checks,
+             "failure_details": failure_details,
+             "deterministic_checks": deterministic_evidence,
              "final_review": review,
              "completion_criteria": criteria.get("completion_criteria", []),
+             "source_plan": source_plan,
              "completion_contract": completion_contract,
+             "historical_task_evidence": task_evidence,
              "branch": PROJECT_BRANCH}
     projstate.write_yaml(a, "final-audit.yaml", audit)
     from .knowledge import update_knowledge
@@ -1620,7 +1855,8 @@ def final_audit(cfg, caller=None, overrides=None, clock=None,
         return {"status": "complete", "audit": audit}
     scheduler.set_project_status("audit_failed")
     return {"status": "audit_failed",
-            "failed_checks": [k for k, v in checks.items() if not v]}
+            "failed_checks": [k for k, v in checks.items() if not v],
+            "failure_details": failure_details}
 
 
 def _unload_local_models_safe(cfg, log):

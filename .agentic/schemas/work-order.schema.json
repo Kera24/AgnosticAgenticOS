@@ -103,6 +103,7 @@
       }
     },
     "expected_outputs": {
+      "description": "Audit projection only. In stable mode the platform replaces this list with canonical backlog required-output paths; the conductor cannot expand task scope.",
       "type": "array",
       "items": {
         "type": "string"
@@ -130,44 +131,104 @@
       ]
     },
     "task_id": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "source_requirements": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
     },
     "required_capabilities": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
     },
     "selected_skills": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
     },
     "selected_mcp_tools": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
     },
     "selected_plugin_components": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
     },
     "selected_agent_role": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "selected_backend": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "selected_model": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "evidence_requirements": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
     },
     "protected_actions": {
       "type": "array",
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
+    },
+    "contract_amendments": {
+      "description": "Optional proposals only. The platform evaluates these against backlog-authored contract_amendment_policy; the conductor cannot approve them.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "value",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "required_output",
+              "allowed_path",
+              "deterministic_check",
+              "acceptance_criterion"
+            ]
+          },
+          "value": {},
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
     }
   }
 }

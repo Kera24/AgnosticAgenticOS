@@ -167,15 +167,17 @@ def test_preflight_feasible_for_coverable_contract(tmp_path):
     assert result["consumes_capacity"] is True
 
 
-def test_preflight_platform_invalid_for_impossible_output(tmp_path):
+def test_preflight_repairs_required_output_write_scope(tmp_path):
     task = simple_task(expected_paths=[{"path": "src/index.js",
                                         "type": "file", "required": True}])
     order = proj_order(task, allowed_paths=["docs/**"])
-    c = contract_mod.build_task_contract(task, order, "p")
-    result = preflight_mod.run_preflight(c, task, [task], str(tmp_path),
-                                         str(tmp_path))
-    assert result["result"] == preflight_mod.RESULT_PLATFORM_INVALID
-    assert result["consumes_capacity"] is False
+    compiled = contract_mod.build_task_contract(task, order, "p")
+
+    assert "src/index.js" in compiled["allowed_paths"]
+    result = preflight_mod.run_preflight(
+        compiled, task, [task], str(tmp_path), str(tmp_path))
+    assert result["result"] == preflight_mod.RESULT_FEASIBLE
+    assert result["consumes_capacity"] is True
 
 
 def test_preflight_dependency_wait_for_incomplete_dependency(tmp_path):
@@ -395,19 +397,27 @@ def test_platform_failure_does_not_increment_failure_streak(base_cfg,
     assert scheduler.state["failure_streak"] == 0
 
 
-def test_impossible_contract_cycle_uses_platform_failure_cooling(sandbox):
+def test_stable_scope_repair_avoids_platform_failure_cooling(sandbox):
     project_cfg(sandbox)
-    sandbox["cfg"]["verification"]["commands"] = []
+    sandbox["cfg"]["verification"]["commands"] = [{
+        "name": "safe-pass",
+        "command": "python -c \"import sys; sys.exit(0)\"",
+        "mandatory": True,
+    }]
     task = simple_task(expected_paths=[{"path": "src/index.js",
                                         "type": "file", "required": True}])
     seed_project(sandbox, [task])
-    caller = std_caller(task)
-    caller.by_role["conductor"] = [proj_order(task,
-                                              allowed_paths=["docs/**"])]
+    caller = std_caller(task, coder=worker_out(edits=[{
+        "path": "src/index.js", "action": "write",
+        "content": "export const READY = true;\n"}]))
+    caller.by_role["conductor"] = [proj_order(
+        task, allowed_paths=["docs/**"])]
+
     result = cycle(sandbox, caller, Clock())
-    assert result["status"] == "failure"
+
+    assert result["status"] == "success"
     assert result["cooling_detail"]["source"] == \
-        "configured_platform_failure_cooldown"
+        "configured_success_cooldown"
     from core.scheduler import Scheduler
     scheduler = Scheduler(sandbox["cfg"], str(sandbox["agentic"] / "memory"))
     assert scheduler.state["failure_streak"] == 0

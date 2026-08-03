@@ -130,7 +130,11 @@ def test_no_shell_true_outside_execpolicy():
     """Repo-wide guard: shell=True may exist only inside execpolicy."""
     import pathlib
     offenders = []
-    for path in pathlib.Path(str(AGENTIC_SRC)).rglob("*.py"):
+    runtime_dirs = {"worktrees", "runs", "memory"}
+    source_root = pathlib.Path(str(AGENTIC_SRC))
+    for path in source_root.rglob("*.py"):
+        if runtime_dirs.intersection(path.relative_to(source_root).parts):
+            continue
         if path.name == "execpolicy.py":
             continue
         if "shell=True" in path.read_text(encoding="utf-8", errors="replace"):

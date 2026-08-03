@@ -11,6 +11,7 @@ Security model (loopback-only control plane for a code-execution system):
 - every state-changing dashboard action is written to the audit trail.
 """
 import datetime as _dt
+import json
 import os
 import queue as _queue
 import threading
@@ -55,10 +56,15 @@ def _loopback_origin(origin):
 
 
 def create_app(load_cfg=None, detector=None, static_dir=None,
-               allow_dev_origin=False):
+               allow_dev_origin=False, enable_project_selection=None):
     """Build the app. `load_cfg`/`detector` are injectable for tests so no
     real CLI is ever probed or invoked during testing."""
+    injected_load_cfg = load_cfg is not None
     load_cfg = load_cfg or (lambda: config_mod.load_config())
+    if enable_project_selection is None:
+        # Synthetic/injected configurations used by tests and embedders must
+        # never inherit a real machine's persisted dashboard selection.
+        enable_project_selection = not injected_load_cfg
     bus = EventBus()
     memory = str(config_mod.AGENTIC_DIR / "memory")
     ops = OperationManager(bus, persist_path=os.path.join(
@@ -110,6 +116,51 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         except Exception as exc:
             raise HTTPException(500, "configuration failed to load: %s"
                                 % exc)
+
+    def _selected_record():
+        """Return the explicitly selected registered project, if any."""
+        from core.registry import ProjectRegistry, RegistryError
+        if not enable_project_selection:
+            return ProjectRegistry(), None
+        registry = ProjectRegistry()
+        path = os.path.join(registry.home, "ui-selected-project.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                project_id = (json.load(fh) or {}).get("project_id")
+            return registry, registry.get(str(project_id)[:64])
+        except (OSError, ValueError, TypeError, RegistryError):
+            return registry, None
+
+    def project_cfg():
+        """Configuration overlay for the selected registered project."""
+        base = cfg()
+        registry, record = _selected_record()
+        if record is None:
+            return base
+        from core import projectops
+        return projectops.project_cfg_for(base, registry, record)
+
+    def project_runtime_dir(configuration):
+        """Selected runtime directory with legacy single-project fallback."""
+        runtime = configuration.get("runtime") or {}
+        return str(runtime.get("project_dir") or config_mod.AGENTIC_DIR)
+
+    def _select_project(project_id):
+        from core.registry import ProjectRegistry, RegistryError
+        registry = ProjectRegistry()
+        try:
+            record = registry.get(project_id[:64])
+        except RegistryError as exc:
+            raise HTTPException(404, str(exc.detail
+                                         if hasattr(exc, "detail")
+                                         else exc))
+        path = os.path.join(registry.home, "ui-selected-project.json")
+        os.makedirs(registry.home, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"project_id": record["id"]}, fh)
+        os.replace(tmp, path)
+        return record
 
     def run_detection(force=False):
         with detection_lock:
@@ -194,39 +245,39 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     @app.get(API + "/doctor")
     def doctor():
         from core.doctor import run_doctor
-        ok, checks = run_doctor(cfg=cfg())
+        ok, checks = run_doctor(cfg=project_cfg())
         return {"ok": ok, "checks": [{"level": lv, "message": msg}
                                      for lv, msg in checks]}
 
     # -- project -----------------------------------------------------------------
     @app.get(API + "/project")
     def project():
-        return snapshots.project_snapshot(cfg())
+        return snapshots.project_snapshot(project_cfg())
 
     @app.get(API + "/project/plan")
     def project_plan():
-        return snapshots.plan_documents(cfg())
+        return snapshots.plan_documents(project_cfg())
 
     @app.get(API + "/project/backlog")
     def project_backlog():
-        return {"tasks": snapshots.backlog(cfg())}
+        return {"tasks": snapshots.backlog(project_cfg())}
 
     @app.get(API + "/project/milestones")
     def project_milestones():
-        snap = snapshots.project_snapshot(cfg())
+        snap = snapshots.project_snapshot(project_cfg())
         return {"milestones": snap["milestones"],
                 "progress": snap["progress"]}
 
     @app.get(API + "/project/blockers")
     def project_blockers():
-        snap = snapshots.project_snapshot(cfg())
+        snap = snapshots.project_snapshot(project_cfg())
         return {"blockers": snap["blockers"],
                 "human_blockers": snap["human_blockers"]}
 
     @app.get(API + "/project/activity")
     def project_activity(limit: int = 300):
         limit = max(1, min(int(limit), 1000))
-        return {"entries": snapshots.activity_entries(limit=limit)}
+        return {"entries": snapshots.activity_entries(limit=limit, cfg=project_cfg())}
 
     def _resolve_plan(body: ProjectStartBody, configuration):
         provided = [p for p in (body.plan_text, body.plan_path)
@@ -262,7 +313,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.post(API + "/project/plan/preview")
     def plan_preview(body: ProjectStartBody):
-        text, source = _resolve_plan(body, cfg())
+        text, source = _resolve_plan(body, project_cfg())
         from core.redact import redact
         return {"source": source, "length": len(text),
                 "content": redact(text[:200_000])}
@@ -278,14 +329,14 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.post(API + "/project/start")
     def project_start_route(body: ProjectStartBody):
-        configuration = cfg()
+        configuration = project_cfg()
         from core import projstate
-        if projstate.exists(str(config_mod.AGENTIC_DIR)):
+        if projstate.exists(project_runtime_dir(configuration)):
             raise HTTPException(409, "a project already exists; the "
                                      "dashboard never deletes project state")
         text, source = _resolve_plan(body, configuration)
-        plans_dir = os.path.join(str(config_mod.AGENTIC_DIR), "runs",
-                                 "ui-plans")
+        plans_dir = os.path.join(project_runtime_dir(configuration),
+                                 "runs", "ui-plans")
         os.makedirs(plans_dir, exist_ok=True)
         plan_path = os.path.join(plans_dir, "plan-%s.md"
                                  % _dt.datetime.now().strftime(
@@ -297,7 +348,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
         def runner():
             from core.project import project_start
-            return project_start(load_cfg(), plan_path)
+            return project_start(configuration, plan_path)
         return _start_operation("project.start", runner,
                                 detail="architecting project")
 
@@ -307,7 +358,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
         def runner():
             from core.project import project_run
-            return project_run(load_cfg(), max_cycles=1)
+            return project_run(project_cfg(), max_cycles=1)
         return _start_operation("project.run", runner,
                                 detail="running one cycle")
 
@@ -315,7 +366,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def project_resume_route():
         from core.project import project_resume
         audit("ui_project_resume")
-        result = project_resume(cfg())
+        result = project_resume(project_cfg())
         bus.publish("state", {"changed": "scheduler"})
         return result
 
@@ -323,7 +374,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     def project_pause_route():
         from core.project import project_pause
         audit("ui_project_pause")
-        result = project_pause(cfg())
+        result = project_pause(project_cfg())
         bus.publish("state", {"changed": "scheduler"})
         return result
 
@@ -333,14 +384,14 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
         def runner():
             from core.project import final_audit
-            return final_audit(load_cfg())
+            return final_audit(project_cfg())
         return _start_operation("project.review", runner,
                                 detail="running final audit")
 
     # -- agents -------------------------------------------------------------------
     @app.get(API + "/agents")
     def agents():
-        return {"agents": snapshots.agents_snapshot(cfg())}
+        return {"agents": snapshots.agents_snapshot(project_cfg())}
 
     # -- backends -------------------------------------------------------------------
     @app.get(API + "/backends")
@@ -406,16 +457,16 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
     # -- capacity / verification -------------------------------------------------
     @app.get(API + "/capacity")
     def capacity():
-        return snapshots.capacity_snapshot(cfg())
+        return snapshots.capacity_snapshot(project_cfg())
 
     @app.get(API + "/verification")
     def verification():
-        return snapshots.verification_snapshot(cfg())
+        return snapshots.verification_snapshot(project_cfg())
 
     @app.get(API + "/logs/{run}/{name}")
     def run_log(run: str, name: str):
         try:
-            return snapshots.read_run_log(run, name)
+            return snapshots.read_run_log(run, name, cfg=project_cfg())
         except snapshots.LogAccessError as exc:
             raise HTTPException(404, str(exc))
 
@@ -424,30 +475,30 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/context")
     def context_view():
-        return intel.context_snapshot(cfg())
+        return intel.context_snapshot(project_cfg())
 
     @app.get(API + "/context/search")
     def context_search(q: str = ""):
         q = q.strip()
         if not q:
             raise HTTPException(422, "query required")
-        return intel.context_search(cfg(), q[:500])
+        return intel.context_search(project_cfg(), q[:500])
 
     @app.get(API + "/memory")
     def memory_view(q: str = "", include_superseded: bool = False):
-        snapshot = intel.memory_snapshot(cfg())
+        snapshot = intel.memory_snapshot(project_cfg())
         snapshot.update(intel.memory_search(
             cfg(), q.strip()[:500], include_superseded=include_superseded))
         return snapshot
 
     @app.get(API + "/memory/{record_id}/timeline")
     def memory_timeline(record_id: str):
-        return intel.memory_timeline(cfg(), record_id[:64])
+        return intel.memory_timeline(project_cfg(), record_id[:64])
 
     @app.get(API + "/memory/records")
     def memory_records(ids: str = ""):
         wanted = [i.strip()[:64] for i in ids.split(",") if i.strip()][:20]
-        return intel.memory_details(cfg(), wanted)
+        return intel.memory_details(project_cfg(), wanted)
 
     class ForgetBody(BaseModel):
         id: str = Field(max_length=64)
@@ -458,7 +509,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         if not body.confirm:
             raise HTTPException(422, "confirmation required to forget a "
                                      "memory record")
-        result = intel.memory_forget(cfg(), body.id)
+        result = intel.memory_forget(project_cfg(), body.id)
         audit("ui_memory_forget", record=body.id,
               forgotten=result["forgotten"])
         if not result["forgotten"]:
@@ -467,12 +518,12 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/knowledge")
     def knowledge_view():
-        return intel.knowledge_snapshot(cfg())
+        return intel.knowledge_snapshot(project_cfg())
 
     @app.get(API + "/knowledge/doc")
     def knowledge_doc(path: str):
         try:
-            doc = intel.knowledge_document(cfg(), path[:500])
+            doc = intel.knowledge_document(project_cfg(), path[:500])
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if doc is None:
@@ -481,7 +532,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/skills")
     def skills_view():
-        return intel.skills_snapshot(cfg())
+        return intel.skills_snapshot(project_cfg())
 
     @app.post(API + "/skills/{skill_id}/{action}")
     def skills_action(skill_id: str, action: str, body: ConfirmBody):
@@ -491,7 +542,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
             raise HTTPException(422, "confirmation required")
         from core.skillreg import SkillError
         try:
-            result = intel.skill_action(cfg(), skill_id[:64], action)
+            result = intel.skill_action(project_cfg(), skill_id[:64], action)
         except SkillError as exc:
             raise HTTPException(422, str(exc))
         audit("ui_skill_action", skill=skill_id[:64], action=action)
@@ -500,7 +551,7 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
 
     @app.get(API + "/routing")
     def routing_view():
-        return intel.routing_snapshot(cfg())
+        return intel.routing_snapshot(project_cfg())
 
     # -- multi-project portfolio / fleet / mcp / auth (MP Phase 9) -----------
     from ui import portfolio as portfolio_mod
@@ -516,12 +567,21 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         confirm: bool = False
 
     DESTRUCTIVE_PROJECT_ACTIONS = {"archive", "remove", "stop"}
-    PROJECT_ACTIONS = {"init", "doctor", "pause", "resume", "stop",
-                       "enable", "archive", "remove"}
+    PROJECT_ACTIONS = {
+        "select", "init", "start", "doctor", "pause", "resume", "stop",
+        "enable", "archive", "remove",
+    }
 
     @app.get(API + "/portfolio")
     def portfolio_view():
         return portfolio_mod.portfolio_snapshot(cfg())
+
+    @app.get(API + "/project-selection")
+    def project_selection():
+        _registry, record = _selected_record()
+        return {"project_id": record["id"] if record else None,
+                "name": record["name"] if record else None}
+
 
     @app.post(API + "/portfolio/add")
     def portfolio_add(body: AddProjectBody):
@@ -545,6 +605,39 @@ def create_app(load_cfg=None, detector=None, static_dir=None,
         if action in DESTRUCTIVE_PROJECT_ACTIONS and not body.confirm:
             raise HTTPException(422, "confirmation required for %s"
                                 % action)
+        if action == "select":
+            record = _select_project(project_id)
+            audit("ui_project_select", project=record["id"])
+            bus.publish("state", {"changed": "project-selection"})
+            return {"project_id": record["id"], "name": record["name"]}
+        if action == "start":
+            from core import projectops, projstate
+            from core.project import project_start
+            from core.registry import ProjectRegistry
+            registry = ProjectRegistry()
+            try:
+                record = registry.get(project_id[:64])
+            except RegistryError as exc:
+                raise HTTPException(404, str(exc.detail
+                                             if hasattr(exc, "detail")
+                                             else exc))
+            project_cfg = projectops.project_cfg_for(cfg(), registry, record)
+            state_dir = project_cfg["runtime"]["project_dir"]
+            if projstate.exists(state_dir):
+                raise HTTPException(409, "project already started")
+            plan = projectops.find_plan(record)
+            if not plan:
+                raise HTTPException(422, "no plan file found for project")
+            registry.update(project_id[:64], enabled=True)
+            audit("ui_portfolio_project_start", project=project_id[:64],
+                  plan=record.get("plan_path"))
+
+            def runner():
+                return project_start(project_cfg, plan)
+
+            return _start_operation(
+                "portfolio.project.start", runner,
+                detail="architecting %s" % project_id[:64])
         try:
             result = portfolio_mod.project_action(cfg(), project_id[:64],
                                                   action)

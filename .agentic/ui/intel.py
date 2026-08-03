@@ -14,14 +14,19 @@ from core.routing import policies, read_decisions, routing_config
 from core.skillreg import SkillRegistry
 
 
-def _memory_dir():
-    return str(config_mod.AGENTIC_DIR / "memory")
+def _agentic_dir(cfg):
+    runtime = cfg.get("runtime") or {}
+    return str(runtime.get("project_dir") or config_mod.AGENTIC_DIR)
+
+
+def _memory_dir(cfg):
+    return os.path.join(_agentic_dir(cfg), "memory")
 
 
 def context_snapshot(cfg, package_limit=25):
     root = str(config_mod.repo_root(cfg))
-    adapter = get_adapter(cfg, root, _memory_dir())
-    packages = read_packages(_memory_dir(), limit=package_limit)
+    adapter = get_adapter(cfg, root, _memory_dir(cfg))
+    packages = read_packages(_memory_dir(cfg), limit=package_limit)
     totals = {"estimated_savings_tokens": 0, "token_estimate": 0}
     for package in packages:
         totals["estimated_savings_tokens"] += \
@@ -40,39 +45,39 @@ def context_snapshot(cfg, package_limit=25):
 
 def context_search(cfg, query, limit=12):
     root = str(config_mod.repo_root(cfg))
-    adapter = get_adapter(cfg, root, _memory_dir())
+    adapter = get_adapter(cfg, root, _memory_dir(cfg))
     return {"provider": adapter.provider_name,
             "results": adapter.search(query, limit=limit)}
 
 
 def memory_snapshot(cfg):
-    service = get_memory(cfg, _memory_dir())
+    service = get_memory(cfg, _memory_dir(cfg))
     return dict(service.status(), config=memory_config(cfg))
 
 
 def memory_search(cfg, query, limit=50, include_superseded=False):
-    service = get_memory(cfg, _memory_dir())
+    service = get_memory(cfg, _memory_dir(cfg))
     return {"records": service.search(query or None, limit=limit,
                                       include_superseded=include_superseded,
                                       include_sensitive=True)}
 
 
 def memory_timeline(cfg, record_id):
-    return {"timeline": get_memory(cfg, _memory_dir())
+    return {"timeline": get_memory(cfg, _memory_dir(cfg))
             .timeline(record_id)}
 
 
 def memory_details(cfg, ids):
-    return {"records": get_memory(cfg, _memory_dir()).details(ids)}
+    return {"records": get_memory(cfg, _memory_dir(cfg)).details(ids)}
 
 
 def memory_forget(cfg, record_id):
-    return {"forgotten": get_memory(cfg, _memory_dir())
+    return {"forgotten": get_memory(cfg, _memory_dir(cfg))
             .forget(record_id)}
 
 
 def knowledge_snapshot(cfg):
-    vault = KnowledgeVault(cfg, str(config_mod.AGENTIC_DIR))
+    vault = KnowledgeVault(cfg, _agentic_dir(cfg))
     status = vault.status()
     docs = []
     for rel in vault.documents():
@@ -86,7 +91,7 @@ def knowledge_snapshot(cfg):
 
 
 def knowledge_document(cfg, rel):
-    vault = KnowledgeVault(cfg, str(config_mod.AGENTIC_DIR))
+    vault = KnowledgeVault(cfg, _agentic_dir(cfg))
     if not rel.endswith(".md"):
         raise ValueError("only markdown documents are served")
     doc = vault.read_doc(rel)          # vault.path() confines the path
@@ -98,12 +103,12 @@ def knowledge_document(cfg, rel):
 
 
 def skills_snapshot(cfg):
-    registry = SkillRegistry(cfg, str(config_mod.AGENTIC_DIR))
+    registry = SkillRegistry(cfg, _agentic_dir(cfg))
     return {"skills": registry.list()}
 
 
 def skill_action(cfg, skill_id, action):
-    registry = SkillRegistry(cfg, str(config_mod.AGENTIC_DIR))
+    registry = SkillRegistry(cfg, _agentic_dir(cfg))
     if action == "enable":
         return registry.enable(skill_id)
     if action == "disable":
@@ -122,6 +127,6 @@ def routing_snapshot(cfg, decision_limit=20):
         "per_agent": routing.get("per_agent") or {},
         "agents": routing.get("agents") or {},
         "policies": policies(cfg),
-        "decisions": list(reversed(read_decisions(_memory_dir(),
+        "decisions": list(reversed(read_decisions(_memory_dir(cfg),
                                                   limit=decision_limit))),
     }

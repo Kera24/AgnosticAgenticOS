@@ -1,8 +1,10 @@
 """Codex CLI backend: non-interactive `codex exec` orchestration.
 
 - auth health check: `codex login status` (never touches ~/.codex/auth.json)
-- invocation: `codex -a never exec --ignore-user-config --ephemeral --json
-  --sandbox <mode> --cd <workspace> -` with the prompt on stdin. Approval
+- invocation: `codex -a never exec [--ignore-user-config] --ephemeral --json
+  --sandbox <mode> --cd <workspace> -` with the prompt on stdin. Native
+  Windows defaults to loading user config because `[windows].sandbox` is
+  required for the Windows sandbox; other platforms retain isolated config. Approval
   configuration is a GLOBAL option on this CLI version and must be placed
   before the `exec` subcommand (`codex -a never exec ...`), never after it
   (`codex exec --ask-for-approval never` is refused unless capability
@@ -24,6 +26,7 @@
   a failure.
 """
 import json
+import os
 import re
 
 from core import errors
@@ -32,7 +35,7 @@ from core import modelres
 from .cli_base import (CLIBackendBase, classify_cli_failure, compose_prompt,
                        parse_retry_hint, validate_cli_command)
 
-WRITE_ROLES = {"coder", "worker"}
+WRITE_ROLES = {"coder", "worker", "ui_designer"}
 SMOKE_MARKER = "CODEX_SMOKE_OK"
 
 
@@ -138,6 +141,22 @@ class CodexCLIBackend(CLIBackendBase):
             return "workspace-write"
         return "read-only"
 
+    def ignore_user_config(self):
+        """Whether to emit ``--ignore-user-config``.
+
+        Native Windows sandbox selection lives in the user's Codex
+        ``[windows]`` configuration. Ignoring that file can silently turn an
+        explicitly requested ``workspace-write`` run into a read-only run, or
+        hide a missing sandbox-helper installation until the first real coding
+        cycle. Preserve the isolated historical default on non-Windows hosts,
+        while loading the Windows sandbox configuration by default. A machine
+        config can always override this explicitly.
+        """
+        configured = self.cfg.get("ignore_user_config")
+        if configured is not None:
+            return bool(configured)
+        return os.name != "nt"
+
     # -- capability probing ------------------------------------------------
     # Used by the smoke test (which can afford the extra `--help` calls) and
     # by setup/doctor diagnostics. NOT consulted on the production invoke()
@@ -197,7 +216,7 @@ class CodexCLIBackend(CLIBackendBase):
             argv = [self.binary(), "exec", "--ask-for-approval", "never"]
         else:
             argv = [self.binary(), "-a", "never", "exec"]
-        if self.cfg.get("ignore_user_config", True):
+        if self.ignore_user_config():
             argv.append("--ignore-user-config")
         if self.cfg.get("ephemeral", True):
             argv.append("--ephemeral")
@@ -290,7 +309,7 @@ class CodexCLIBackend(CLIBackendBase):
         caps = self.capabilities()
         pre, post = self._probed_approval_args(caps)
         argv = [self.binary()] + pre + ["exec"] + post
-        if caps.get("ignore_user_config", True):
+        if self.ignore_user_config() and caps.get("ignore_user_config", True):
             argv.append("--ignore-user-config")
         if caps.get("ephemeral", True):
             argv.append("--ephemeral")

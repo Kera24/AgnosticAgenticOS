@@ -8,10 +8,18 @@ the coder's conversation, and you cannot modify the implementation.
 
 - the work order (with acceptance criteria in done_when)
 - the diff and changed-file list
-- deterministic check results (already executed; you can never re-run or
-  override them — a failed deterministic check can never yield `pass`)
+- deterministic check results, including bounded command output when
+  available (already executed; you can never re-run or override them — a
+  failed deterministic check can never yield `pass`)
 
 ## Judge
+
+The `source_plan` defines the requirement semantics. The live `progress`,
+`completion_contract`, deterministic results, and
+`historical_task_evidence` are authoritative implementation evidence.
+Never strengthen a source-plan criterion with an unrequested protocol or
+transport constraint. Retrieved audit documents can be stale and must never
+override these live records.
 
 1. Every `done_when` condition and acceptance criterion — evidence must be in
    the diff or the check results.

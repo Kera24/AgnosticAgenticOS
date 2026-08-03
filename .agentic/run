@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agentic OS entry point.
+r"""Agentic OS entry point.
 
 Repository maintenance:
   python .agentic/run doctor            validate environment + configuration
@@ -44,6 +44,7 @@ Full-project build:
   python .agentic/run project-run [--primary X --fallback Y --fallback Z]
   python .agentic/run project-resume | project-status | project-pause
   python .agentic/run project-review    run the final audit now
+  python .agentic/run release-check     test platform, build UI, verify pilots
   python .agentic/run capacity          capacity ledger + next-cycle estimate
   python .agentic/run backends          backend circuit-breaker states
   python .agentic/run backends reset-breaker <backend>
@@ -111,6 +112,14 @@ Model Capability Registry + Hierarchical Orchestration (Phase 8/9):
     (e.g. orchestrator_frontier, coder_medium, reviewer_high, local_fallback)
   python .agentic/run models select <role> [risk]   explainable routing
   python .agentic/run models capacity               frontier reserve status
+
+Advanced feature promotion gates:
+  python .agentic/run features status <project-id> [feature]
+  python .agentic/run features promote <project-id> <feature> <state>
+                                        state: disabled|shadow|canary|stable
+  python .agentic/run features probe <project-id> contract_amendments
+                                        replay real shadow evidence through
+                                        active policy without changing project
 
 Overrides (any command): --primary/--fallback (one run only),
 --set key.path=value, --profile NAME
@@ -281,9 +290,17 @@ def cmd_project_pause(cfg, args):
 
 def cmd_project_review(cfg, args):
     from core.project import final_audit
+    cfg, _memory = _apply_project_overlay(cfg, args)
     result = final_audit(cfg, overrides=_overrides(args))
     _print(result)
     return 0 if result["status"] == "complete" else 1
+
+
+def cmd_release_check(cfg, args):
+    from core.releasecheck import run_release_check
+    result = run_release_check(cfg)
+    _print(result)
+    return 0 if result["ready"] else 1
 
 
 def cmd_capacity(cfg, args):
@@ -1379,20 +1396,104 @@ def cmd_ui(cfg, args):
                   dev_origin=args.dev)
 
 
+def cmd_features(cfg, args):
+    """Inspect or explicitly promote project-scoped advanced features."""
+    from core import projectops
+    from core.featuregates import FeatureGateRegistry, STATES
+    from core.registry import ProjectRegistry
+
+    action = args.plan or "status"
+    extra = list(args.extra or [])
+    if not extra:
+        print("usage: features status <project-id> [feature] | "
+              "features promote <project-id> <feature> <state> | "
+              "features probe <project-id> contract_amendments",
+              file=sys.stderr)
+        return 2
+    project_id = extra[0]
+    registry = ProjectRegistry()
+    record = projectops.resolve_project(registry, project_id)
+    project_cfg = projectops.project_cfg_for(cfg, registry, record)
+    memory_dir = os.path.join(
+        project_cfg["runtime"]["project_dir"], "memory")
+    gates = FeatureGateRegistry(memory_dir, project_cfg)
+
+    if action == "status":
+        requested = extra[1] if len(extra) > 1 else None
+        names = ([requested] if requested else sorted(
+            set((project_cfg.get("advanced_features") or {}).keys()) |
+            set(gates.data.get("features", {}).keys()) |
+            {"contract_amendments"}))
+        _print({
+            "project": project_id,
+            "features": {
+                name: gates.status(name, project_id=project_id)
+                for name in names},
+        })
+        return 0
+    if action == "promote":
+        if len(extra) < 3 or extra[2] not in STATES:
+            print("usage: features promote <project-id> <feature> "
+                  "<disabled|shadow|canary|stable>", file=sys.stderr)
+            return 2
+        feature, target = extra[1], extra[2]
+        feature_cfg = (
+            (project_cfg.get("advanced_features") or {}).get(feature)
+            or {})
+        minimum = int(feature_cfg.get("promotion_min_successes", 1))
+        minimum_canary_probes = int(feature_cfg.get(
+            "promotion_min_canary_probes", 1))
+        try:
+            decision = gates.promote(
+                feature, target, minimum_successes=minimum,
+                project_id=project_id,
+                minimum_canary_probes=minimum_canary_probes)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        _print({
+            "project": project_id,
+            "feature": feature,
+            "promoted_to": target,
+            "decision": decision,
+            "evidence": gates.status(
+                feature, project_id=project_id),
+        })
+        return 0
+    if action == "probe":
+        feature = extra[1] if len(extra) > 1 else "contract_amendments"
+        if feature != "contract_amendments":
+            print("unsupported feature probe: %s" % feature,
+                  file=sys.stderr)
+            return 2
+        from core.featureprobe import run_contract_amendment_probe
+        try:
+            result = run_contract_amendment_probe(
+                project_cfg, project_id)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        _print(result)
+        return 0 if result.get("passed") else 1
+    print("unknown features action %r" % action, file=sys.stderr)
+    return 2
+
+
 COMMANDS = {
     "doctor": cmd_doctor, "tick": cmd_tick, "queue": cmd_queue,
     "trust": cmd_trust, "audit": cmd_audit, "goals": cmd_goals,
     "setup": cmd_setup, "project-start": cmd_project_start,
     "project-run": cmd_project_run, "project-resume": cmd_project_resume,
     "project-status": cmd_project_status, "project-pause": cmd_project_pause,
-    "project-review": cmd_project_review, "capacity": cmd_capacity,
+    "project-review": cmd_project_review,
+    "release-check": cmd_release_check, "capacity": cmd_capacity,
     "backends": cmd_backends, "package": cmd_package, "ui": cmd_ui,
     "context": cmd_context, "cache": cmd_cache, "runs": cmd_runs,
     "memory": cmd_memory,
     "knowledge": cmd_knowledge, "skills": cmd_skills,
     "project": cmd_project, "fleet": cmd_fleet, "mcp": cmd_mcp,
     "capability": cmd_capability, "plugin": cmd_plugin,
-    "models": cmd_models,
+    "models": cmd_models, "features": cmd_features,
     "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
     "status": cmd_status, "logs": cmd_logs, "dashboard": cmd_dashboard,
 }

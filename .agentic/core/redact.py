@@ -5,9 +5,9 @@ import os
 import re
 
 _PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI-style keys
-    re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}"),        # Anthropic keys
-    re.compile(r"sk-or-[A-Za-z0-9_\-]{16,}"),         # OpenRouter keys
+    re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI-style keys
+    re.compile(r"(?<![A-Za-z0-9_])sk-ant-[A-Za-z0-9_\-]{16,}"),        # Anthropic keys
+    re.compile(r"(?<![A-Za-z0-9_])sk-or-[A-Za-z0-9_\-]{16,}"),         # OpenRouter keys
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),        # GitHub tokens
     re.compile(r"xox[abprs]-[A-Za-z0-9\-]{10,}"),     # Slack tokens
     re.compile(r"AKIA[0-9A-Z]{16}"),                  # AWS access key ids
@@ -47,3 +47,20 @@ def looks_like_secret(text):
     if not isinstance(text, str):
         return False
     return any(p.search(text) for p in _PATTERNS)
+
+
+def looks_like_secret_in_diff(diff_text):
+    """Return True only when a credential is introduced by a patch.
+
+    A unified diff also contains removed lines and unchanged context. Scanning
+    the entire patch can therefore reject a safe change because of content the
+    task did not add. File-header lines are metadata, not content. Every real
+    added line remains subject to the complete credential pattern set.
+    """
+    if not isinstance(diff_text, str):
+        return False
+    for line in diff_text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            if looks_like_secret(line[1:]):
+                return True
+    return False

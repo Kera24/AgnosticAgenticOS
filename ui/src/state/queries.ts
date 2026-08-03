@@ -19,6 +19,7 @@ import type {
 } from "../lib/types";
 
 export const keys = {
+  selection: ["project-selection"] as const,
   project: ["project"] as const,
   backlog: ["project", "backlog"] as const,
   plan: ["project", "plan"] as const,
@@ -31,6 +32,18 @@ export const keys = {
   operations: ["operations"] as const,
   doctor: ["doctor"] as const,
 };
+
+export type ProjectSelection = {
+  project_id: string | null;
+  name: string | null;
+};
+
+export function useProjectSelection() {
+  return useQuery({
+    queryKey: keys.selection,
+    queryFn: () => api.get<ProjectSelection>("/project-selection"),
+  });
+}
 
 export function useProject() {
   return useQuery({

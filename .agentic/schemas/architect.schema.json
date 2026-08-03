@@ -53,6 +53,33 @@
                                   "items": {"type": "string"}},
           "deterministic_checks": {"type": "array",
                                    "items": {"type": "string"}},
+          "contract_amendment_policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["enabled", "allowed_kinds"],
+            "properties": {
+              "enabled": {"type": "boolean"},
+              "allowed_kinds": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": ["required_output", "allowed_path",
+                           "deterministic_check", "acceptance_criterion"]
+                }
+              },
+              "allowed_paths": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1}
+              },
+              "allowed_commands": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1}
+              }
+            }
+          },
           "skill": {"type": ["string", "null"]},
           "kind": {"type": "string",
                    "description": "Optional: 'bootstrap' for scaffolding tasks with no test framework yet, 'test_setup' for the task that installs it. Unset for ordinary feature/business-logic tasks."}

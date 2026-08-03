@@ -273,12 +273,26 @@ def classify_project(cfg, registry, record, clock=None):
         if not eligible:
             return "cooling", reason
     if projstate.exists(state_dir):
-        blockers = projstate.open_blockers(state_dir, human_only=True)
-        if blockers:
+        human_blockers = projstate.open_blockers(
+            state_dir, human_only=True)
+        if human_blockers:
             return "blocked", "waiting for external approval: %s" \
-                % blockers[0]["reason"][:120]
+                % human_blockers[0]["reason"][:120]
         if sched_state.get("project_status") == "audit_failed":
             return "failed", "final audit failed"
+        # A project can be enabled while every remaining task is blocked by
+        # dependencies. Dispatching it cannot make progress and previously
+        # caused the service worker to launch the same no-op cycle forever.
+        # Keep planning pure: explicit recovery remains responsible for
+        # changing blocker/task state.
+        if projstate.next_task(state_dir) is None:
+            blockers = projstate.open_blockers(state_dir)
+            if blockers:
+                return "blocked", "no eligible task: %s" \
+                    % blockers[0]["reason"][:120]
+            backlog = projstate.load_backlog(state_dir)
+            if any(t.get("status") != "done" for t in backlog):
+                return "blocked", "no eligible task (dependencies blocked)"
     if not record.get("enabled"):
         return "ready", "initialised; not started"
     if not projstate.exists(state_dir):

@@ -59,8 +59,11 @@ class Scheduler:
     # -- cooling ------------------------------------------------------------
     def _cooling_cfg(self):
         merged = dict(DEFAULT_COOLING)
-        merged.update((self.cfg.get("scheduler") or {}).get("cooling") or {})
+        # Load the deprecated top-level shape first. The canonical nested
+        # scheduler.cooling setting (including machine-local overrides)
+        # must win when both are present.
         merged.update(self.cfg.get("cooling") or {})
+        merged.update((self.cfg.get("scheduler") or {}).get("cooling") or {})
         return merged
 
     def _clamp(self, minutes):

@@ -40,6 +40,18 @@ type Project = {
   supabase: { detected: boolean; project_ref: string | null };
   code_index: { provider?: string; files_indexed?: number } | null;
   runtime_dir: string;
+  final_audit: {
+    complete: boolean;
+    failed_checks: string[];
+    failure_details: {
+      check: string;
+      name: string;
+      command: string | null;
+      exit_code: number | null;
+      kind: string;
+      detail: string;
+    }[];
+  } | null;
 };
 
 type PortfolioView = {
@@ -91,6 +103,8 @@ export function Portfolio() {
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["portfolio"] });
     queryClient.invalidateQueries({ queryKey: ["fleet"] });
+    queryClient.invalidateQueries({ queryKey: ["project-selection"] });
+    queryClient.invalidateQueries({ queryKey: ["project"] });
   };
 
   const act = useMutation({
@@ -98,7 +112,12 @@ export function Portfolio() {
       { id: string; action: string; confirmed?: boolean }) =>
       api.post(`/portfolio/${id}/${action}`,
                confirmed ? { confirm: true } : {}),
-    onSuccess: () => { setConfirm(null); setError(null); refresh(); },
+    onSuccess: (_data, variables) => {
+      setConfirm(null);
+      setError(null);
+      if (variables.action === "select") setSelected(null);
+      refresh();
+    },
     onError: (err) => {
       setConfirm(null);
       setError(err instanceof ApiError ? err.message : String(err));
@@ -232,7 +251,9 @@ export function Portfolio() {
                     />
                   </td>
                   <td style={{ maxWidth: 260 }}>
-                    {waitingByProject.get(p.id) ?? p.waiting_reason}
+                    {p.final_audit?.failure_details?.length
+                      ? p.waiting_reason
+                      : waitingByProject.get(p.id) ?? p.waiting_reason}
                   </td>
                   <td>
                     <BackendChip name={p.scheduler.selected_backend} />
@@ -248,6 +269,15 @@ export function Portfolio() {
                           onClick={() =>
                             act.mutate({ id: p.id, action: "init" })}>
                           init
+                        </button>
+                      )}
+                      {p.state === "ready" && (
+                        <button className="btn primary"
+                          style={{ minHeight: 24 }}
+                          disabled={act.isPending}
+                          onClick={() =>
+                            act.mutate({ id: p.id, action: "start" })}>
+                          {act.isPending ? "starting…" : "start"}
                         </button>
                       )}
                       {p.state === "paused" ? (
@@ -319,9 +349,27 @@ export function Portfolio() {
                        .join(" ")
                    : "not started"],
                 ["runtime state", selected.runtime_dir],
+                ["final audit",
+                 selected.final_audit
+                   ? selected.final_audit.complete
+                     ? "passed"
+                     : `failed: ${selected.final_audit.failed_checks.join(", ")}`
+                   : "not run"],
+                ["audit evidence",
+                 selected.final_audit?.failure_details?.length
+                   ? selected.final_audit.failure_details
+                       .map((failure) =>
+                         `${failure.name}: ${failure.detail}`)
+                       .join(" | ")
+                   : "none"],
               ]}
             />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button className="btn primary"
+                onClick={() =>
+                  act.mutate({ id: selected.id, action: "select" })}>
+                Select project
+              </button>
               <button className="btn"
                 onClick={() =>
                   act.mutate({ id: selected.id, action: "doctor" })}>

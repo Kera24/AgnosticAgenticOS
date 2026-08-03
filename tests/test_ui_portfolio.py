@@ -28,7 +28,8 @@ def ui_client(sandbox, monkeypatch, tmp_path):
     cfg["backends"] = {"mock": {"type": "api", "provider": "mock",
                                 "model": "mock-model"}}
     cfg["routing"] = {"mode": "simple", "primary": "mock", "fallbacks": []}
-    app = create_app(load_cfg=lambda: cfg, detector=NO_DETECT)
+    app = create_app(load_cfg=lambda: cfg, detector=NO_DETECT,
+                     enable_project_selection=True)
     client = TestClient(app, base_url="http://127.0.0.1")
     client.sandbox = sandbox
     client.tmp = tmp_path
@@ -61,6 +62,34 @@ def test_portfolio_add_and_snapshot(ui_client):
     assert "api_key" not in json.dumps(snap).lower()
 
 
+
+def test_portfolio_exposes_final_audit_failure_evidence(ui_client):
+    record = add_app_folder(ui_client)
+    pid = record["id"]
+    ui_client.post("/api/v1/portfolio/%s/init" % pid, json={})
+    project = ui_client.get("/api/v1/portfolio").json()["projects"][0]
+    audit_path = os.path.join(
+        project["runtime_dir"], "project", "final-audit.yaml")
+    with open(audit_path, "w", encoding="utf-8") as fh:
+        json.dump({
+            "complete": False,
+            "checks": {"local_browser_smoke": False},
+            "failure_details": [{
+                "check": "local_browser_smoke",
+                "name": "local-static-app-smoke",
+                "detail": "index.html has no application root",
+            }],
+        }, fh)
+
+    project = ui_client.get("/api/v1/portfolio").json()["projects"][0]
+
+    assert project["final_audit"]["complete"] is False
+    assert project["final_audit"]["failed_checks"] == [
+        "local_browser_smoke"]
+    assert project["final_audit"]["failure_details"][0]["detail"] == \
+        "index.html has no application root"
+
+
 def test_portfolio_add_rejects_bad_paths(ui_client):
     r = ui_client.post("/api/v1/portfolio/add",
                        json={"name": "ghost",
@@ -90,6 +119,45 @@ def test_portfolio_lifecycle_actions_and_confirmations(ui_client):
                           json={}).status_code == 404
     assert ui_client.post("/api/v1/portfolio/x/frobnicate",
                           json={}).status_code == 404
+
+
+
+def test_portfolio_start_uses_registered_project_overlay(ui_client,
+                                                         monkeypatch):
+    record = add_app_folder(ui_client)
+    pid = record["id"]
+    ui_client.post("/api/v1/portfolio/%s/init" % pid, json={})
+    captured = {}
+
+    import core.project as project_mod
+
+    def fake_start(cfg, plan, **kw):
+        from core import config as config_mod
+        captured["project_dir"] = cfg["runtime"]["project_dir"]
+        captured["root"] = str(config_mod.repo_root(cfg))
+        captured["plan"] = plan
+        return {"status": "started"}
+
+    monkeypatch.setattr(project_mod, "project_start", fake_start)
+    response = ui_client.post("/api/v1/portfolio/%s/start" % pid, json={})
+    assert response.status_code == 200, response.text
+    operation = response.json()
+    assert operation["kind"] == "portfolio.project.start"
+
+    import time
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        current = ui_client.get(
+            "/api/v1/operations/%s" % operation["id"]).json()
+        if current["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert current["status"] == "succeeded"
+    assert captured["root"] == record["root_path"]
+    assert captured["plan"] == str(
+        ui_client.tmp / "apps" / "demo-app" / "plan.md")
+    assert pid in captured["project_dir"]
+
 
 
 def test_portfolio_doctor_and_pause(ui_client):
@@ -197,3 +265,36 @@ def test_portfolio_mutations_loopback_guarded(ui_client):
                         json={"name": "x", "root": "C:\\x"},
                         headers={"Origin": "https://evil.example.com"})
     assert r2.status_code == 403
+
+
+def test_select_project_drives_project_api_overlay(ui_client, monkeypatch):
+    first = add_app_folder(ui_client, "first-app")
+    second = add_app_folder(ui_client, "second-app")
+
+    selected = ui_client.post(
+        "/api/v1/portfolio/%s/select" % second["id"], json={})
+    assert selected.status_code == 200
+    assert selected.json()["project_id"] == second["id"]
+    assert ui_client.get("/api/v1/project-selection").json() == {
+        "project_id": second["id"], "name": second["name"]}
+
+    captured = {}
+    from ui import snapshots
+
+    def fake_snapshot(configuration):
+        captured["root"] = str(configuration["project"]["repository_root"])
+        captured["project_dir"] = configuration["runtime"]["project_dir"]
+        return {"exists": False}
+
+    monkeypatch.setattr(snapshots, "project_snapshot", fake_snapshot)
+    response = ui_client.get("/api/v1/project")
+    assert response.status_code == 200
+    assert captured["root"] == second["root_path"]
+    assert second["id"] in captured["project_dir"]
+    assert captured["root"] != first["root_path"]
+
+
+def test_select_project_rejects_unknown_registry_id(ui_client):
+    response = ui_client.post(
+        "/api/v1/portfolio/not-registered/select", json={})
+    assert response.status_code == 404

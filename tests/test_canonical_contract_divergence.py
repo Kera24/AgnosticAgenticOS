@@ -12,6 +12,7 @@ backlog `expected_paths` = [package.json, index.html, {src, directory}];
 work-order `expected_outputs` = [package.json, index.html, .gitignore,
 src/index.js, tests]; `allowed_paths` additionally covers `.gitignore`,
 `src/**/*`, `tests/**/*`."""
+import json
 import os
 
 from conftest import Clock, FakeCaller, git, project_cfg, seed_project, simple_task, worker_out
@@ -94,21 +95,22 @@ def test_live_divergence_fails_preflight_as_platform_invalid(tmp_path):
     assert names["work_order_matches_compiled_contract"]["ok"] is False
 
 
-def test_live_divergence_blocks_before_any_backend_invocation(sandbox):
-    project_cfg(sandbox)
+def test_live_divergence_is_projected_onto_canonical_contract():
     task = _live_task()
-    seed_project(sandbox, [task])
-    caller = FakeCaller({"conductor": _live_order()})
-    result = run_cycle(sandbox["cfg"], caller=caller, clock=Clock())
-    assert result["status"] == "failure"
-    coder_calls = [c for c in caller.calls if c["role"] == "coder"]
-    assert coder_calls == []   # never dispatched -- preflight short-circuited
-    a = str(sandbox["agentic"])
-    blockers = projstate.open_blockers(a)
-    assert blockers
-    assert blockers[0]["code"] == \
-        projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH
-    assert blockers[0]["failure_class"] == "task_contract_invalid"
+    proposed = _live_order()
+    stable = contract_mod.canonicalize_work_order(task, proposed)
+    compiled = contract_mod.build_task_contract(
+        task, stable, "ollama-pilot")
+
+    canonical_paths = {
+        entry["path"] for entry in compiled["required_outputs"]}
+    assert canonical_paths == {"package.json", "index.html", "src"}
+    assert stable["expected_outputs"] == [
+        "package.json", "index.html", "src"]
+    assert ".gitignore" not in stable["expected_outputs"]
+    assert "src/index.js" not in stable["expected_outputs"]
+    assert "tests/" not in stable["expected_outputs"]
+    assert contract_mod.find_work_order_divergences(compiled) == []
 
 
 # -- migration: item 1's six typed required outputs, item 8's exact fix -------
@@ -394,3 +396,168 @@ def test_unrelated_blocker_never_touched_by_contract_recovery(sandbox):
     assert events == []
     tasks = {t["id"]: t for t in projstate.load_backlog(a)}
     assert tasks["t1-first"]["status"] == "blocked"
+
+
+def test_work_order_prose_outputs_match_typed_glob_and_json_member():
+    task = simple_task(
+        "t9-test-suite-setup",
+        expected_paths=[
+            {"path": "tests/*.test.js", "type": "glob", "required": True},
+            {"path": "package.json#scripts.test", "type": "file",
+             "required": True},
+        ])
+    order = _live_order(expected_outputs=[
+        "Updated `package.json` with `scripts.test`.",
+        "One or more JS tests in `tests/*.test.js` covering CRUD.",
+    ])
+    compiled = contract_mod.build_task_contract(
+        task, order, "ollama-pilot", "20260728-055526")
+
+    assert contract_mod.find_work_order_divergences(compiled) == []
+
+    compiled["work_order_expected_outputs"].append(
+        "Also create `unplanned.config.js`.")
+    assert any("unplanned.config.js" in problem for problem in
+               contract_mod.find_work_order_divergences(compiled))
+
+
+def test_artifact_backed_recovery_clears_only_now_valid_structural_blocker(
+        sandbox):
+    project_cfg(sandbox)
+    task = simple_task(
+        "t9-test-suite-setup",
+        expected_paths=[
+            {"path": "tests/*.test.js", "type": "glob", "required": True},
+            {"path": "package.json#scripts.test", "type": "file",
+             "required": True},
+        ])
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = "preflight platform_invalid: false prose path comparison"
+    projstate.update_task(agentic_dir, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason,
+        code=projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+        human_only=False)
+
+    order = _live_order(expected_outputs=[
+        "Updated `package.json` with `scripts.test`.",
+        "One or more JS tests in `tests/*.test.js` covering CRUD.",
+    ])
+    compiled = contract_mod.build_task_contract(
+        task, order, "ollama-pilot", "r9")
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r9"
+    run_dir.mkdir(parents=True)
+    (run_dir / "task-contract.json").write_text(
+        json.dumps(compiled), encoding="utf-8")
+
+    events = contract_recovery.recover_fixed_contract_comparison_blockers(
+        agentic_dir, str(sandbox["agentic"] / "memory"), sandbox["cfg"])
+
+    current = {t["id"]: t for t in projstate.load_backlog(agentic_dir)}
+    assert current[task["id"]]["status"] == "pending"
+    assert current[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(agentic_dir) == []
+    assert events[0]["action"] == \
+        "reset_false_structural_contract_mismatch"
+    assert events[0]["run_id"] == "r9"
+
+
+def test_stable_projection_discards_conductor_scope_expansion():
+    task = simple_task(
+        "t5-task-list-renderer",
+        expected_paths=[
+            {"path": "src/components/task-list.html", "type": "file",
+             "required": True},
+            {"path": "tests/t5-renderer.test.js", "type": "file",
+             "required": True},
+        ],
+        acceptance_criteria=["renderer works"],
+        deterministic_checks=[
+            "node -e \"require('./dist/tests/t5-ui')\""])
+    proposed = _live_order(
+        expected_outputs=[
+            "src/components/task-list.html",
+            "tests/t5-renderer.test.js",
+            "dist/tests/t5-ui",
+        ],
+        allowed_paths=["src/index.js", "dist/tests/t5-ui"])
+    proposed["acceptance_criteria"] = ["conductor invented criterion"]
+    proposed["deterministic_checks"] = ["conductor invented command"]
+
+    stable = contract_mod.canonicalize_work_order(task, proposed)
+    compiled = contract_mod.build_task_contract(
+        task, stable, "ollama-pilot", "r-stable")
+
+    assert stable["expected_outputs"] == [
+        "src/components/task-list.html",
+        "tests/t5-renderer.test.js",
+    ]
+    assert stable["acceptance_criteria"] == ["renderer works"]
+    assert stable["deterministic_checks"] == [
+        "node -e \"require('./dist/tests/t5-ui')\""]
+    assert "src/components/task-list.html" in stable["allowed_paths"]
+    assert "tests/t5-renderer.test.js" in stable["allowed_paths"]
+    assert contract_mod.find_work_order_divergences(compiled) == []
+
+
+def test_stable_projection_maps_json_member_to_writable_document():
+    task = simple_task(
+        "t9-test-suite-setup",
+        expected_paths=[{
+            "path": "package.json#scripts.test",
+            "type": "file",
+            "required": True,
+        }])
+    stable = contract_mod.canonicalize_work_order(
+        task, _live_order(allowed_paths=[]))
+
+    assert stable["expected_outputs"] == ["package.json#scripts.test"]
+    assert stable["allowed_paths"] == ["package.json"]
+
+
+def test_stable_authority_recovery_resets_conductor_expansion_blocker(
+        sandbox):
+    project_cfg(sandbox)
+    task = simple_task(
+        "t5-task-list-renderer",
+        expected_paths=[{
+            "path": "tests/t5-renderer.test.js",
+            "type": "file",
+            "required": True,
+        }])
+    seed_project(sandbox, [task])
+    agentic_dir = str(sandbox["agentic"])
+    reason = ("preflight platform_invalid: work-order expected output "
+              "'dist/tests/t5-ui' is not present in the compiled task "
+              "contract's required_outputs")
+    projstate.update_task(agentic_dir, task["id"], status="blocked",
+                          blocking_reason=reason, last_result="failure")
+    projstate.add_blocker(
+        agentic_dir, task["id"], reason,
+        code=projstate.BLOCKER_CODE_STRUCTURAL_CONTRACT_MISMATCH,
+        human_only=False)
+
+    proposed = _live_order(
+        expected_outputs=[
+            "tests/t5-renderer.test.js", "dist/tests/t5-ui"],
+        allowed_paths=["tests/t5-renderer.test.js", "dist/tests/t5-ui"])
+    compiled = contract_mod.build_task_contract(
+        task, proposed, "ollama-pilot", "r-expand")
+    run_dir = sandbox["agentic"] / "runs" / "cycle-r-expand"
+    run_dir.mkdir(parents=True)
+    (run_dir / "task-contract.json").write_text(
+        json.dumps(compiled), encoding="utf-8")
+
+    events = contract_recovery.recover_stable_contract_authority_blockers(
+        agentic_dir, str(sandbox["agentic"] / "memory"), sandbox["cfg"])
+
+    current = {item["id"]: item for item in
+               projstate.load_backlog(agentic_dir)}
+    assert current[task["id"]]["status"] == "pending"
+    assert current[task["id"]]["blocking_reason"] is None
+    assert projstate.open_blockers(agentic_dir) == []
+    assert events[0]["action"] == "reset_conductor_contract_expansion"
+    assert events[0]["discarded_conductor_outputs"] == [
+        "tests/t5-renderer.test.js", "dist/tests/t5-ui"]
